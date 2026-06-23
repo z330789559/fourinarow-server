@@ -1,8 +1,9 @@
 pub mod chat;
 mod feedback;
+pub mod platform;
 pub mod users;
 
-use actix_web::{dev::HttpResponseBuilder, web, HttpRequest, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse, HttpResponseBuilder};
 use serde::Serialize;
 use HttpResponse as HR;
 
@@ -16,7 +17,8 @@ pub fn config(cfg: &mut web::ServiceConfig) {
     )
     .service(web::scope("/users").configure(users::config))
     .service(web::scope("/chat").configure(chat::config))
-    .service(web::scope("/feedback").configure(feedback::config));
+    .service(web::scope("/feedback").configure(feedback::config))
+    .service(web::scope("/platform").configure(platform::config));
 }
 
 #[derive(Serialize)]
@@ -83,3 +85,4 @@ pub fn get_session_token(req: &HttpRequest) -> Option<SessionToken> {
         .map(|s| s.to_str().ok().map(|s| SessionToken::parse(s)))
         .flatten()
 }
+

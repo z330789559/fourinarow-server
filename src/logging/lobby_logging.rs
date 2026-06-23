@@ -1,13 +1,19 @@
 #![allow(dead_code)]
 use actix::Message;
-use mongodb::bson::oid::ObjectId;
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
 
 #[derive(Clone)]
-pub struct LobbyId(ObjectId);
+pub struct LobbyId(String);
 
 impl LobbyId {
     pub fn new() -> Self {
-        LobbyId(ObjectId::new())
+        LobbyId(
+            thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(24)
+                .map(char::from)
+                .collect(),
+        )
     }
 }
 

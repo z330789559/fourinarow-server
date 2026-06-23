@@ -22,13 +22,13 @@ struct BeforeIdQuery {
 }
 async fn get_messages_by_thread_id(
     db_mgr: web::Data<Arc<DatabaseManager>>,
-    web::Path(thread_id): web::Path<String>,
-    web::Query(query): web::Query<BeforeIdQuery>,
+    thread_id: web::Path<String>,
+    query: web::Query<BeforeIdQuery>,
 ) -> HttpResponse {
     HttpResponse::Ok().json(
         db_mgr
             .chat_msgs
-            .get_messages_in_thread(thread_id, query.before_id)
+            .get_messages_in_thread(thread_id.into_inner(), query.before_id)
             .await,
     )
 }
@@ -41,8 +41,8 @@ pub struct PostedChatMsg {
 async fn post_chat_msg(
     req: HttpRequest,
     db_mgr: web::Data<Arc<DatabaseManager>>,
-    web::Path(thread_id): web::Path<String>,
-    web::Json(msg): web::Json<PostedChatMsg>,
+    thread_id: web::Path<String>,
+    msg: web::Json<PostedChatMsg>,
 ) -> HttpResponse {
     let session_token = get_session_token(&req);
     let user_id = match session_token {
@@ -54,12 +54,16 @@ async fn post_chat_msg(
         None => None,
     };
 
-    if let Ok(_) = db_mgr.chat_msgs.add(thread_id, user_id, msg).await {
-        HttpResponse::Ok()
+    if db_mgr
+        .chat_msgs
+        .add(thread_id.into_inner(), user_id, msg.into_inner())
+        .await
+        .is_ok()
+    {
+        HttpResponse::Ok().finish()
     } else {
-        HttpResponse::InternalServerError()
+        HttpResponse::InternalServerError().finish()
     }
-    .finish()
 }
 
 pub use chat_thread_id::*;
@@ -106,3 +110,4 @@ mod chat_thread_id {
         }
     }
 }
+

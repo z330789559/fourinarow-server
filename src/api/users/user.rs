@@ -39,7 +39,7 @@ impl UserId {
         for rand_char in rand_id.iter_mut() {
             // *rand_char = abc[thread_rng().gen()];
             // *rand_digit =
-            *rand_char = abc[thread_rng().gen_range(0, VALID_USER_ID_CHARS.len())];
+        *rand_char = abc[thread_rng().gen_range(0..VALID_USER_ID_CHARS.len())];
         }
         // thread_rng().fill(&mut rand_id);
         UserId(rand_id)
@@ -231,7 +231,7 @@ pub mod pw {
             self.0 == Self::hash(password)
         }
 
-        fn from_str(string: &str) -> Result<HashedPassword, &str> {
+        pub fn from_str(string: &str) -> Result<HashedPassword, &str> {
             let mut vec = Vec::new();
             for i in (0..string.len()).step_by(2) {
                 if let Ok(b) = u8::from_str_radix(&string[i..i + 2], 16) {

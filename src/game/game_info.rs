@@ -24,7 +24,7 @@ impl GameId {
         let abc = VALID_GAME_ID_CHARS.chars().collect::<Vec<_>>();
         let mut rand_chars: [char; GAME_ID_LEN] = ['a'; GAME_ID_LEN];
         for rand_char in rand_chars.iter_mut() {
-            *rand_char = abc[thread_rng().gen_range(0, VALID_GAME_ID_CHARS.len())];
+            *rand_char = abc[thread_rng().gen_range(0..VALID_GAME_ID_CHARS.len())];
         }
         GameId(rand_chars)
     }
@@ -112,7 +112,7 @@ impl GameInfo {
         GameInfo {
             // id: crate::logging::GameId::new(),
             field: [[None; FIELD_SIZE]; FIELD_SIZE],
-            turn: [Player::One, Player::Two][thread_rng().gen_range(0, 2)],
+            turn: [Player::One, Player::Two][thread_rng().gen_range(0..2)],
             winner: None,
         }
     }

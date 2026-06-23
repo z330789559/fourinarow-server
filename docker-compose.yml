@@ -5,10 +5,23 @@ services:
   server:
     build: .
     environment:
-      - MONGO_URL=mongodb://mongodb:27017/
+      - DATABASE_URL=******postgres:5432/fourinarow
       - BIND=0.0.0.0:8080
+      # WeChat mini-game credentials (set in .env or as secrets)
+      - WECHAT_APPID=${WECHAT_APPID:-}
+      - WECHAT_SECRET=${WECHAT_SECRET:-}
+      # Douyin mini-game credentials
+      - DOUYIN_APPID=${DOUYIN_APPID:-}
+      - DOUYIN_SECRET=${DOUYIN_SECRET:-}
+      # Email feedback
+      - GMAIL_MAIL_FROM=${GMAIL_MAIL_FROM:-}
+      - GMAIL_MAIL_TO=${GMAIL_MAIL_TO:-}
+      - GMAIL_PW=${GMAIL_PW:-}
     expose:
       - 8080
+    depends_on:
+      postgres:
+        condition: service_healthy
     labels:
       traefik.enable: "true"
       traefik.http.routers.fourinarow-server.rule: "Host(`fourinarow.ffactory.me`)"
@@ -18,13 +31,22 @@ services:
       - default
       - traefik
 
-  mongodb:
-    image: mongo
+  postgres:
+    image: postgres:16-alpine
     restart: always
+    environment:
+      POSTGRES_USER: fourinarow
+      POSTGRES_PASSWORD: fourinarow
+      POSTGRES_DB: fourinarow
     expose:
-      - 27017  
+      - 5432
     volumes:
-      - ./db:/data/db
+      - ./db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fourinarow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 networks:
   traefik:

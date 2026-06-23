@@ -1,32 +1,25 @@
 use std::time::SystemTime;
 
-use futures::future::OptionFuture;
-use mongodb::Database;
-use mongodb::{bson::*, options::FindOptions, Collection};
-use serde::{Deserialize, Serialize};
-use tokio::stream::StreamExt;
+use sqlx::PgPool;
 
 use crate::api::chat::{PostedChatMsg, PublicChatMsg};
 use crate::api::users::user::UserId;
 
 pub struct ChatMsgCollection {
-    collection: Collection<DbChatMsg>,
+    pool: PgPool,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(sqlx::FromRow)]
 struct DbChatMsg {
-    thread_id: String,
-    id: i64,        // (u64) Monotonically increasing index of messages in this thread_id
-    timestamp: i64, // (u64)
-    from: Option<UserId>,
+    id: i64,
+    from_id: Option<String>,
     content: String,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl ChatMsgCollection {
-    pub fn new(db: &Database) -> Self {
-        ChatMsgCollection {
-            collection: db.collection_with_type("chat_messages"),
-        }
+    pub fn new(pool: PgPool) -> Self {
+        ChatMsgCollection { pool }
     }
 
     pub async fn get_messages_in_thread(
@@ -34,38 +27,41 @@ impl ChatMsgCollection {
         thread_id: String,
         maybe_before_id: Option<u64>,
     ) -> Vec<PublicChatMsg> {
-        let doc = if let Some(before_id) = maybe_before_id {
-            doc! { "thread_id": thread_id, "id": { "$lt": before_id } }
+        let rows: Vec<DbChatMsg> = if let Some(before_id) = maybe_before_id {
+            sqlx::query_as(
+                "SELECT id, from_id, content, created_at \
+                 FROM   chat_messages \
+                 WHERE  thread_id = $1 AND id < $2 \
+                 ORDER  BY id DESC \
+                 LIMIT  50",
+            )
+            .bind(&thread_id)
+            .bind(before_id as i64)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default()
         } else {
-            doc! { "thread_id": thread_id}
+            sqlx::query_as(
+                "SELECT id, from_id, content, created_at \
+                 FROM   chat_messages \
+                 WHERE  thread_id = $1 \
+                 ORDER  BY id DESC \
+                 LIMIT  50",
+            )
+            .bind(&thread_id)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default()
         };
-        let mut options = FindOptions::default();
-        options.limit = Some(50);
-        let minus_one: i32 = -1;
-        options.sort = Some(doc! { "id": minus_one });
-        let messages: OptionFuture<_> = self
-            .collection
-            .find(doc, Some(options))
-            .await
-            .map(|cursor| {
-                cursor
-                    .map(|result| {
-                        result.map(|db_msg| PublicChatMsg {
-                            id: db_msg.id,
-                            from: db_msg.from,
-                            timestamp: db_msg.timestamp,
-                            content: db_msg.content,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+
+        rows.into_iter()
+            .map(|r| PublicChatMsg {
+                id: r.id,
+                from: r.from_id.and_then(|s| UserId::from_str(&s).ok()),
+                timestamp: r.created_at.timestamp(),
+                content: r.content,
             })
-            .ok()
-            .into();
-        messages
-            .await
-            .map(|r| r.ok())
-            .flatten()
-            .unwrap_or(Vec::new())
+            .collect()
     }
 
     pub async fn add(
@@ -74,37 +70,25 @@ impl ChatMsgCollection {
         from_id: Option<UserId>,
         msg: PostedChatMsg,
     ) -> Result<(), ()> {
-        let msg_id = self
-            .get_messages_in_thread(thread_id.clone(), None)
-            .await
-            .first()
-            .map_or(0, |m| m.id + 1);
-
-        let db_msg = DbChatMsg::from(thread_id, msg_id, from_id, msg);
-        self.collection
-            .insert_one(db_msg, None)
-            .await
-            .map(|_| ())
-            .map_err(|_| ())
+        sqlx::query(
+            "INSERT INTO chat_messages (thread_id, from_id, content) VALUES ($1, $2, $3)",
+        )
+        .bind(&thread_id)
+        .bind(from_id.map(|u| u.to_string()))
+        .bind(&msg.content)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|_| ())
     }
 }
 
-impl DbChatMsg {
-    fn from(
-        thread_id: String,
-        msg_id: i64,
-        from_id: Option<UserId>,
-        posted_msg: PostedChatMsg,
-    ) -> Self {
-        DbChatMsg {
-            thread_id,
-            id: msg_id,
-            timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-            from: from_id,
-            content: posted_msg.content,
-        }
-    }
+// Kept for timestamp compatibility (unused but avoids dead-code noise)
+#[allow(dead_code)]
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
+
