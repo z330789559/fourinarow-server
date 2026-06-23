@@ -3,6 +3,7 @@ mod database;
 mod game;
 mod items;
 mod logging;
+mod player;
 mod quests;
 
 use std::io;
@@ -64,6 +65,7 @@ async fn start_server(bind_addr: &str) -> io::Result<()> {
     )
     .start();
 
+    let shutdown_db_mgr = db_mgr.clone();
     let db_mgr = web::Data::new(db_mgr);
     let user_mgr_addr = web::Data::new(user_mgr_addr);
     let connection_mgr_addr = web::Data::new(connection_mgr_addr);
@@ -116,5 +118,11 @@ async fn start_server(bind_addr: &str) -> io::Result<()> {
     .bind(bind_addr)
     .expect("Failed to bind address.")
     .run()
-    .await
+    .await?;
+
+    if let Err(error) = shutdown_db_mgr.players.flush_all().await {
+        log::error!("failed to flush player cache during shutdown: {:?}", error);
+    }
+
+    Ok(())
 }

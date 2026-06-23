@@ -145,7 +145,12 @@ mod friends {
         user_mgr: web::Data<Addr<user_mgr::UserManager>>,
         id: web::Path<UserId>,
     ) -> HR {
-        modify(req, FriendsAction::Delete(id.into_inner()), user_mgr.get_ref()).await
+        modify(
+            req,
+            FriendsAction::Delete(id.into_inner()),
+            user_mgr.get_ref(),
+        )
+        .await
     }
 
     async fn modify(

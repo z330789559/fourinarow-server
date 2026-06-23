@@ -1,5 +1,6 @@
 use actix::Message;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use std::fmt;
 
 #[derive(Clone)]
 pub struct GameOId(String);
@@ -13,6 +14,12 @@ impl GameOId {
                 .map(char::from)
                 .collect(),
         )
+    }
+}
+
+impl fmt::Display for GameOId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 pub enum GameEndReason {

@@ -1,0 +1,48 @@
+schema: spec-driven
+
+context: |
+  Project: mini-game-server (crate fourinarow-server) — Rust 在线四子棋实时对战服务端。
+  Language for artifacts: Chinese for explanations, English for code identifiers and technical terms.
+
+  Tech stack:
+  - Rust 2021, Actix-web 4 + actix-web-actors 4 + actix 0.13 + tokio 1
+  - sqlx 0.7 (postgres + macros + migrate, 编译期校验) on PostgreSQL 16
+  - WebSocket 实时对战 + 自研可靠传输层（ACK / 重传 / 重排序 / 自动重连）
+  - Modules: src/api (REST), src/game (WS actor 对战), src/database (sqlx), src/items, src/quests, src/logging
+
+  Development workflow:
+  - Use OpenSpec for feature governance: proposals, specs, design, tasks, validation.
+  - Use Superpowers for execution discipline: brainstorming, TDD, systematic debugging, code review.
+  - When both apply, first use OpenSpec to define the change, then implement and verify with Superpowers.
+  - 最高优先级规范见工程根目录 AGENTS.md；CLAUDE.md 与之冲突时以 AGENTS.md 为准。
+
+  Engineering principles:
+  - Prefer small, incremental, verifiable changes.
+  - schema 唯一真相是 migrations/；改表结构必须新增 migration，绝不修改旧 migration。
+  - 改 WS 协议 (src/game/msg.rs) 须同步检查 client_adapter 可靠层与客户端契约。
+  - sqlx 查询字段须与当前 migration schema 一致；脱库编译需 cargo sqlx prepare。
+  - Do not introduce new dependencies without explaining why.
+  - 无单元测试框架，行为改动须给手动验证步骤（cargo check + 启动服务/load_test.html）。
+
+rules:
+  proposal:
+    - Explain the problem, goal, non-goals, affected users, and affected systems.
+    - Include risks, compatibility impact, and rollback plan.
+    - Keep the proposal concise and implementation-neutral.
+
+  specs:
+    - Describe observable behavior and product requirements.
+    - Use Given/When/Then scenarios when possible.
+    - State WebSocket message protocol and REST contract compatibility clearly.
+
+  design:
+    - Explain API, WS protocol, database (migration), configuration, and deployment impact.
+    - Prefer existing api/game/database layering before introducing new abstractions.
+    - Include migration strategy when schema or protocol changes.
+    - Identify security, performance, and reliability (reconnect/ordering) considerations.
+
+  tasks:
+    - Break work into small, verifiable steps.
+    - Include manual verification for each meaningful change (no test framework).
+    - Include rollback or recovery steps for risky changes (DB / protocol).
+    - Do not mark tasks complete until verification is done.

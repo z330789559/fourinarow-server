@@ -125,6 +125,20 @@ pub mod msg {
             let db = self.db.clone();
             Box::pin(
                 async move {
+                    if let Some(user) = db
+                        .users
+                        .get_session_token(msg.0.clone(), &db.friendships)
+                        .await
+                    {
+                        if let Err(error) = db.players.flush_player(&user.id).await {
+                            log::error!(
+                                "failed to flush player {} on logout: {:?}",
+                                user.id,
+                                error
+                            );
+                            return Err(ApiError::InternalServerError);
+                        }
+                    }
                     db.users
                         .remove_session_token(msg.0)
                         .await
@@ -224,67 +238,23 @@ pub mod msg {
                         }
                         Game(game_msg) => match game_msg {
                             PlayedGame(game_info) => {
+                                let settlement_id = game_info.settlement_id;
                                 let winner_id = game_info.winner;
                                 let loser_id = game_info.loser;
-                                let mut found = false;
-                                if let Some(mut winner) =
-                                    db.users.get_id(&winner_id, &db.friendships).await
-                                {
-                                    winner.game_info.skill_rating += SR_PER_WIN;
-                                    db.users.update(winner).await;
-                                    found = true;
-                                }
-                                if let Some(mut loser) =
-                                    db.users.get_id(&loser_id, &db.friendships).await
-                                {
-                                    if found {
-                                        loser.game_info.skill_rating -= SR_PER_WIN;
-                                        db.users.update(loser).await;
-                                        db.games.insert(game_info).await;
-
-                                        let rewards = db
-                                            .quests
-                                            .on_event(
-                                                &winner_id,
-                                                &crate::quests::GameEvent::GameWon,
-                                            )
-                                            .await;
-                                        for (item_id, qty) in rewards {
-                                            let _ =
-                                                db.items.add_item(&winner_id, &item_id, qty).await;
-                                        }
-
-                                        let rewards = db
-                                            .quests
-                                            .on_event(
-                                                &winner_id,
-                                                &crate::quests::GameEvent::GamePlayed,
-                                            )
-                                            .await;
-                                        for (item_id, qty) in rewards {
-                                            let _ =
-                                                db.items.add_item(&winner_id, &item_id, qty).await;
-                                        }
-
-                                        let rewards = db
-                                            .quests
-                                            .on_event(
-                                                &loser_id,
-                                                &crate::quests::GameEvent::GamePlayed,
-                                            )
-                                            .await;
-                                        for (item_id, qty) in rewards {
-                                            let _ =
-                                                db.items.add_item(&loser_id, &item_id, qty).await;
-                                        }
-                                    }
-                                } else if found {
-                                    if let Some(mut winner) =
-                                        db.users.get_id(&winner_id, &db.friendships).await
-                                    {
-                                        winner.game_info.skill_rating -= SR_PER_WIN;
-                                        db.users.update(winner).await;
-                                    }
+                                let settle_result = db
+                                    .players
+                                    .settle_game(&settlement_id, &winner_id, &loser_id, SR_PER_WIN)
+                                    .await;
+                                db.users.invalidate_cache(&winner_id);
+                                db.users.invalidate_cache(&loser_id);
+                                if let Err(error) = settle_result {
+                                    log::error!(
+                                        "failed to settle game settlement_id={} winner={} loser={}: {:?}",
+                                        settlement_id,
+                                        winner_id,
+                                        loser_id,
+                                        error
+                                    );
                                 }
                             }
                         },
@@ -300,6 +270,13 @@ pub mod msg {
                                         // Only reset the address if the requesting ClientAdapter is still linked (might have been replaced already)
                                         user.playing = None;
                                         db.users.update(user).await;
+                                        if let Err(error) = db.players.flush_player(&id).await {
+                                            log::error!(
+                                                "failed to flush player {} on stop playing: {:?}",
+                                                id,
+                                                error
+                                            );
+                                        }
                                     }
                                 }
                             }

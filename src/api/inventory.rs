@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use actix_web::{web, HttpRequest, HttpResponse};
 
-use crate::{api::get_session_token, database::DatabaseManager};
+use crate::{api::get_session_token, database::items::InventoryEntry, database::DatabaseManager};
 
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.route("", web::get().to(get_inventory))
@@ -18,7 +18,20 @@ async fn get_inventory(req: HttpRequest, db: web::Data<Arc<DatabaseManager>>) ->
         return HttpResponse::Unauthorized().finish();
     };
 
-    HttpResponse::Ok().json(db.items.get_inventory(&user.id).await)
+    match db.players.get_readonly(&user.id).await {
+        Ok(player) => {
+            let inventory = player
+                .inventory
+                .into_iter()
+                .map(|(item_id, quantity)| InventoryEntry { item_id, quantity })
+                .collect::<Vec<_>>();
+            HttpResponse::Ok().json(inventory)
+        }
+        Err(error) => {
+            log::error!("failed to load player inventory {}: {:?}", user.id, error);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
 }
 
 async fn get_shop(db: web::Data<Arc<DatabaseManager>>, shop_id: web::Path<String>) -> HttpResponse {
@@ -38,14 +51,29 @@ async fn buy_item(
         return HttpResponse::Unauthorized().finish();
     };
 
-    match db.items.purchase(&user.id, &shop_id, &item_id).await {
+    let request_id = req
+        .headers()
+        .get("Idempotency-Key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if request_id.is_some_and(|value| value.len() > 96) {
+        return HttpResponse::BadRequest().body("Idempotency-Key is too long");
+    }
+
+    match db
+        .players
+        .purchase(&user.id, &shop_id, &item_id, request_id)
+        .await
+    {
         Ok(()) => HttpResponse::Ok().finish(),
-        Err(crate::database::items::ItemError::NotEnoughItems) => {
+        Err(crate::player::PurchaseError::NotEnoughItems) => {
             HttpResponse::BadRequest().body("Not enough items")
         }
-        Err(crate::database::items::ItemError::ItemNotFound) => {
+        Err(crate::player::PurchaseError::ItemNotFound) => {
             HttpResponse::NotFound().body("Item not found in shop")
         }
+        Err(crate::player::PurchaseError::AlreadyApplied) => HttpResponse::Conflict().finish(),
         Err(_) => HttpResponse::InternalServerError().finish(),
     }
 }

@@ -5,7 +5,6 @@ use serde::{de, Deserialize, Serialize, Serializer};
 use std::fmt;
 use std::slice::Iter;
 
-
 use crate::api::chat::ChatThreadId;
 use crate::database::DatabaseManager;
 use crate::game::client_state::ClientState;
@@ -39,7 +38,7 @@ impl UserId {
         for rand_char in rand_id.iter_mut() {
             // *rand_char = abc[thread_rng().gen()];
             // *rand_digit =
-        *rand_char = abc[thread_rng().gen_range(0..VALID_USER_ID_CHARS.len())];
+            *rand_char = abc[thread_rng().gen_range(0..VALID_USER_ID_CHARS.len())];
         }
         // thread_rng().fill(&mut rand_id);
         UserId(rand_id)
@@ -285,14 +284,19 @@ impl UserGameInfo {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PlayedGameInfo {
+    pub settlement_id: String,
     pub winner: UserId,
     pub loser: UserId,
     // pub one_won: bool,
     // kind: GameKind,
 }
 impl PlayedGameInfo {
-    pub fn new(winner: UserId, loser: UserId) -> PlayedGameInfo {
-        PlayedGameInfo { winner, loser }
+    pub fn new(settlement_id: String, winner: UserId, loser: UserId) -> PlayedGameInfo {
+        PlayedGameInfo {
+            settlement_id,
+            winner,
+            loser,
+        }
     }
 }
 #[derive(Serialize, Deserialize)]

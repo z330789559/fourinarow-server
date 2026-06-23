@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     api::{get_session_token, ApiResponse},
     database::DatabaseManager,
+    player::RedeemError,
 };
 
 pub fn config(cfg: &mut web::ServiceConfig) {
@@ -75,18 +76,32 @@ async fn redeem_invite(
         return HttpResponse::Unauthorized().finish();
     };
 
-    match db.invites.redeem(&payload.code, &user.id).await {
-        Ok(maybe_reward) => {
-            if let Some((ref item_id, qty)) = maybe_reward {
-                let _ = db.items.add_item(&user.id, item_id, qty).await;
-            }
-
-            HttpResponse::Ok().json(RedeemResp {
-                message: "Invite redeemed successfully".to_string(),
-                reward_item_id: maybe_reward.as_ref().map(|(item_id, _)| item_id.clone()),
-                reward_quantity: maybe_reward.map(|(_, qty)| qty),
-            })
+    match db.players.redeem_invite(&payload.code, &user.id).await {
+        Ok(maybe_reward) => HttpResponse::Ok().json(RedeemResp {
+            message: "Invite redeemed successfully".to_string(),
+            reward_item_id: maybe_reward.as_ref().map(|(item_id, _)| item_id.clone()),
+            reward_quantity: maybe_reward.map(|(_, qty)| qty),
+        }),
+        Err(RedeemError::InvalidCode) => {
+            HttpResponse::BadRequest().json(ApiResponse::new("Invalid invite code"))
         }
-        Err(message) => HttpResponse::BadRequest().json(ApiResponse::new(message)),
+        Err(RedeemError::Expired) => {
+            HttpResponse::BadRequest().json(ApiResponse::new("Invite code has expired"))
+        }
+        Err(RedeemError::MaxUsesReached) => HttpResponse::BadRequest()
+            .json(ApiResponse::new("Invite code has reached its maximum uses")),
+        Err(RedeemError::AlreadyUsed) => HttpResponse::BadRequest()
+            .json(ApiResponse::new("You have already used this invite code")),
+        Err(RedeemError::CacheFlush(error)) => {
+            log::error!(
+                "failed to flush player cache before invite redeem: {:?}",
+                error
+            );
+            HttpResponse::InternalServerError().json(ApiResponse::new("Failed to redeem invite"))
+        }
+        Err(RedeemError::Db(error)) => {
+            log::error!("failed to redeem invite: {:?}", error);
+            HttpResponse::InternalServerError().json(ApiResponse::new("Failed to redeem invite"))
+        }
     }
 }

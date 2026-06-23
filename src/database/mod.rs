@@ -10,6 +10,8 @@ pub mod users;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
+use crate::player::PlayerRepository;
+
 use self::{
     chat_msg::ChatMsgCollection, friendships::FriendshipCollection, games::GameCollection,
     invites::InviteCollection, items::ItemCollection, leaderboard::LeaderboardCollection,
@@ -28,6 +30,7 @@ pub struct DatabaseManager {
     pub invites: InviteCollection,
     pub leaderboard: LeaderboardCollection,
     pub quests: QuestCollection,
+    pub players: PlayerRepository,
 }
 
 impl DatabaseManager {
@@ -47,6 +50,9 @@ impl DatabaseManager {
             .await
             .expect("Failed to run database migrations");
 
+        let players = PlayerRepository::new(pool.clone());
+        players.start_flush_worker();
+
         DatabaseManager {
             users: UserCollection::new(pool.clone()),
             games: GameCollection::new(pool.clone()),
@@ -56,6 +62,7 @@ impl DatabaseManager {
             invites: InviteCollection::new(pool.clone()),
             leaderboard: LeaderboardCollection::new(pool.clone()),
             quests: QuestCollection::new(pool.clone()),
+            players,
             pool,
         }
     }

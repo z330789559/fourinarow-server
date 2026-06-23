@@ -44,7 +44,7 @@ impl ItemCollection {
         .unwrap_or_default()
     }
 
-    pub async fn get_balance(&self, user_id: &UserId, item_id: &str) -> i32 {
+    async fn get_balance(&self, user_id: &UserId, item_id: &str) -> i32 {
         let row: Option<(i32,)> = sqlx::query_as(
             "SELECT quantity FROM user_inventory WHERE user_id = $1 AND item_id = $2",
         )
@@ -58,12 +58,7 @@ impl ItemCollection {
         row.map(|(quantity,)| quantity).unwrap_or(0)
     }
 
-    pub async fn add_item(
-        &self,
-        user_id: &UserId,
-        item_id: &str,
-        qty: i32,
-    ) -> Result<(), ItemError> {
+    async fn add_item(&self, user_id: &UserId, item_id: &str, qty: i32) -> Result<(), ItemError> {
         sqlx::query(
             "INSERT INTO user_inventory (user_id, item_id, quantity) VALUES ($1, $2, $3) \
              ON CONFLICT (user_id, item_id) DO UPDATE SET quantity = user_inventory.quantity + $3",
@@ -77,7 +72,7 @@ impl ItemCollection {
         .map_err(|_| ItemError::DbError)
     }
 
-    pub async fn consume_item(
+    async fn consume_item(
         &self,
         user_id: &UserId,
         item_id: &str,
@@ -102,7 +97,7 @@ impl ItemCollection {
         }
     }
 
-    pub async fn purchase(
+    async fn purchase(
         &self,
         user_id: &UserId,
         shop_id: &str,

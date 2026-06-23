@@ -332,18 +332,8 @@ impl UserCollection {
             self.playing_users_cache.remove(&user.id);
         }
 
-        let ok =
-            sqlx::query("UPDATE users SET skill_rating = $1, updated_at = NOW() WHERE id = $2")
-                .bind(user.game_info.skill_rating)
-                .bind(user.id.to_string())
-                .execute(&self.pool)
-                .await
-                .is_ok();
-
-        if ok {
-            self.cache_put(&user);
-        }
-        ok
+        self.invalidate_cache(&user.id);
+        true
     }
 
     pub async fn find_or_create_platform_user(

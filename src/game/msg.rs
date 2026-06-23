@@ -78,7 +78,7 @@ pub enum ReliabilityError {
     InvalidFormat,  // ReliableMessage could not be parsed
     UnknownMessage, // Correct format but unknown keyword (ack, syn, msg)
     #[allow(dead_code)]
-    KillClient,     // Sent in case client is fucking up bad. Kills it immediately.
+    KillClient, // Sent in case client is fucking up bad. Kills it immediately.
 }
 impl ReliabilityError {
     pub fn serialize(self) -> String {
@@ -160,13 +160,15 @@ pub enum ServerMessage {
     GameOver(bool), // true if recipient won
     LobbyClosing,
     ReadyForGamePing,
-    LoginResponse { success: bool },
+    LoginResponse {
+        success: bool,
+    },
     Error(Option<SrvMsgError>),
     BattleReq(UserId, GameId),
     CurrentServerState(usize, bool), // connected players, someone wants to play
     ChatMessage(bool, String, Option<String>), // is_global, message, sender_name
     ChatRead(bool),                  // is_global
-    
+
     /// Sent when another client logs into an account which is authenticated on this connection -> this one is closed
     CloseOtherClientLogin,
 }
