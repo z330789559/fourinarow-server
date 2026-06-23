@@ -11,7 +11,7 @@ use self::{
     users::UserCollection,
 };
 
-const DATABASE_URL_DEFAULT: &str = "******localhost:5432/fourinarow";
+const DATABASE_URL_DEFAULT: &str = "postgres://postgres:postgres@localhost:5432/fourinarow";
 
 pub struct DatabaseManager {
     pub pool: PgPool,

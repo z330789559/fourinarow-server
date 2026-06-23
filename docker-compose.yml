@@ -5,7 +5,7 @@ services:
   server:
     build: .
     environment:
-      - DATABASE_URL=******postgres:5432/fourinarow
+      - DATABASE_URL=postgres://fourinarow:fourinarow@postgres:5432/fourinarow
       - BIND=0.0.0.0:8080
       # WeChat mini-game credentials (set in .env or as secrets)
       - WECHAT_APPID=${WECHAT_APPID:-}
