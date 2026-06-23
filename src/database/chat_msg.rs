@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use sqlx::PgPool;
 
 use crate::api::chat::{PostedChatMsg, PublicChatMsg};
@@ -83,12 +81,4 @@ impl ChatMsgCollection {
     }
 }
 
-// Kept for timestamp compatibility (unused but avoids dead-code noise)
-#[allow(dead_code)]
-fn now_unix_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
 

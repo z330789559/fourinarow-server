@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS friendships (
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     UNIQUE (user_id_1, user_id_2),
+    -- Enforces normalised pair: the smaller ID always goes in user_id_1.
+    -- See src/database/friendships.rs normalize() for the Rust-side enforcement.
     CHECK  (user_id_1 < user_id_2)
 );
 
