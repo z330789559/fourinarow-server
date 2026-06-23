@@ -1,5 +1,6 @@
 use actix::Addr;
 use dashmap::DashMap;
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use sqlx::PgPool;
 
 use super::friendships::FriendshipCollection;
@@ -28,11 +29,16 @@ struct DbUser {
 
 impl DbUser {
     fn into_backend(self, playing: Option<Addr<ClientState>>, friendships: BackendFriendshipsMe) -> Option<BackendUserMe> {
-        let user_id = UserId::from_str(&self.id).ok()?;
+        let user_id = UserId::from_str(&self.id)
+            .map_err(|e| log::warn!("Failed to parse user id '{}': {:?}", self.id, e))
+            .ok()?;
+        let password = HashedPassword::from_str(&self.password_hash)
+            .map_err(|e| log::warn!("Failed to parse password hash for user '{}': {:?}", self.id, e))
+            .ok()?;
         Some(BackendUserMe {
             id: user_id,
             username: self.username,
-            password: HashedPassword::from_str(&self.password_hash).ok()?,
+            password,
             email: self.email,
             game_info: UserGameInfo { skill_rating: self.skill_rating },
             playing,
@@ -277,8 +283,9 @@ impl UserCollection {
             }
             uid
         } else {
-            // Generate a unique user id
+            // Generate a unique user id (max 10 attempts before giving up)
             let mut new_uid = UserId::new();
+            let mut id_attempts = 0u8;
             loop {
                 let exists: Option<(bool,)> = sqlx::query_as(
                     "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)",
@@ -290,12 +297,17 @@ impl UserCollection {
                 if !exists.map(|(v,)| v).unwrap_or(true) {
                     break;
                 }
+                id_attempts += 1;
+                if id_attempts >= 10 {
+                    log::error!("Failed to generate unique user ID after 10 attempts");
+                    return None;
+                }
                 new_uid = UserId::new();
             }
 
             let base_name = nickname
                 .map(|n| n.chars().take(20).collect::<String>())
-                .unwrap_or_else(|| format!("user_{}", &new_uid.to_string()[..6]));
+                .unwrap_or_else(|| format!("user_{}", new_uid.to_string().chars().take(6).collect::<String>()));
             let final_name = self.make_unique_username(&base_name).await;
 
             sqlx::query(
@@ -353,6 +365,15 @@ impl UserCollection {
                 return name;
             }
             counter += 1;
+            if counter > 100 {
+                // Extremely unlikely; append random suffix as last resort
+                let suffix: String = thread_rng()
+                    .sample_iter(&Alphanumeric)
+                    .take(4)
+                    .map(char::from)
+                    .collect();
+                return format!("{}_{}", base, suffix);
+            }
             name = format!("{}_{}", base, counter);
         }
     }
