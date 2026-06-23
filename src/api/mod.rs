@@ -1,6 +1,10 @@
 pub mod chat;
 mod feedback;
+pub mod inventory;
+pub mod invites;
+pub mod leaderboard;
 pub mod platform;
+pub mod quests;
 pub mod users;
 
 use actix_web::{web, HttpRequest, HttpResponse, HttpResponseBuilder};
@@ -18,7 +22,11 @@ pub fn config(cfg: &mut web::ServiceConfig) {
     .service(web::scope("/users").configure(users::config))
     .service(web::scope("/chat").configure(chat::config))
     .service(web::scope("/feedback").configure(feedback::config))
-    .service(web::scope("/platform").configure(platform::config));
+    .service(web::scope("/platform").configure(platform::config))
+    .service(web::scope("/leaderboard").configure(leaderboard::config))
+    .service(web::scope("/invites").configure(invites::config))
+    .service(web::scope("/inventory").configure(inventory::config))
+    .service(web::scope("/quests").configure(quests::config));
 }
 
 #[derive(Serialize)]
@@ -82,7 +90,6 @@ pub enum ApiError {
 pub fn get_session_token(req: &HttpRequest) -> Option<SessionToken> {
     req.headers()
         .get("SessionToken")
-        .map(|s| s.to_str().ok().map(|s| SessionToken::parse(s)))
-        .flatten()
+        .and_then(|value| value.to_str().ok())
+        .map(SessionToken::parse)
 }
-
