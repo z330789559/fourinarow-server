@@ -1,6 +1,10 @@
 pub mod chat_msg;
 pub mod friendships;
 pub mod games;
+pub mod invites;
+pub mod items;
+pub mod leaderboard;
+pub mod quests;
 pub mod users;
 
 use sqlx::postgres::PgPoolOptions;
@@ -8,10 +12,11 @@ use sqlx::PgPool;
 
 use self::{
     chat_msg::ChatMsgCollection, friendships::FriendshipCollection, games::GameCollection,
-    users::UserCollection,
+    invites::InviteCollection, items::ItemCollection, leaderboard::LeaderboardCollection,
+    quests::QuestCollection, users::UserCollection,
 };
 
-const DATABASE_URL_DEFAULT: &str = "postgres://postgres:postgres@localhost:5432/fourinarow";
+const DATABASE_URL_DEFAULT: &str = "******localhost:5432/fourinarow";
 
 pub struct DatabaseManager {
     pub pool: PgPool,
@@ -19,6 +24,10 @@ pub struct DatabaseManager {
     pub games: GameCollection,
     pub friendships: FriendshipCollection,
     pub chat_msgs: ChatMsgCollection,
+    pub items: ItemCollection,
+    pub invites: InviteCollection,
+    pub leaderboard: LeaderboardCollection,
+    pub quests: QuestCollection,
 }
 
 impl DatabaseManager {
@@ -43,6 +52,10 @@ impl DatabaseManager {
             games: GameCollection::new(pool.clone()),
             friendships: FriendshipCollection::new(pool.clone()),
             chat_msgs: ChatMsgCollection::new(pool.clone()),
+            items: ItemCollection::new(pool.clone()),
+            invites: InviteCollection::new(pool.clone()),
+            leaderboard: LeaderboardCollection::new(pool.clone()),
+            quests: QuestCollection::new(pool.clone()),
             pool,
         }
     }

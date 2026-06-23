@@ -224,25 +224,63 @@ pub mod msg {
                         }
                         Game(game_msg) => match game_msg {
                             PlayedGame(game_info) => {
+                                let winner_id = game_info.winner;
+                                let loser_id = game_info.loser;
                                 let mut found = false;
                                 if let Some(mut winner) =
-                                    db.users.get_id(&game_info.winner, &db.friendships).await
+                                    db.users.get_id(&winner_id, &db.friendships).await
                                 {
                                     winner.game_info.skill_rating += SR_PER_WIN;
                                     db.users.update(winner).await;
                                     found = true;
                                 }
                                 if let Some(mut loser) =
-                                    db.users.get_id(&game_info.loser, &db.friendships).await
+                                    db.users.get_id(&loser_id, &db.friendships).await
                                 {
                                     if found {
                                         loser.game_info.skill_rating -= SR_PER_WIN;
                                         db.users.update(loser).await;
                                         db.games.insert(game_info).await;
+
+                                        let rewards = db
+                                            .quests
+                                            .on_event(
+                                                &winner_id,
+                                                &crate::quests::GameEvent::GameWon,
+                                            )
+                                            .await;
+                                        for (item_id, qty) in rewards {
+                                            let _ =
+                                                db.items.add_item(&winner_id, &item_id, qty).await;
+                                        }
+
+                                        let rewards = db
+                                            .quests
+                                            .on_event(
+                                                &winner_id,
+                                                &crate::quests::GameEvent::GamePlayed,
+                                            )
+                                            .await;
+                                        for (item_id, qty) in rewards {
+                                            let _ =
+                                                db.items.add_item(&winner_id, &item_id, qty).await;
+                                        }
+
+                                        let rewards = db
+                                            .quests
+                                            .on_event(
+                                                &loser_id,
+                                                &crate::quests::GameEvent::GamePlayed,
+                                            )
+                                            .await;
+                                        for (item_id, qty) in rewards {
+                                            let _ =
+                                                db.items.add_item(&loser_id, &item_id, qty).await;
+                                        }
                                     }
                                 } else if found {
                                     if let Some(mut winner) =
-                                        db.users.get_id(&game_info.winner, &db.friendships).await
+                                        db.users.get_id(&winner_id, &db.friendships).await
                                     {
                                         winner.game_info.skill_rating -= SR_PER_WIN;
                                         db.users.update(winner).await;
@@ -369,7 +407,7 @@ pub mod msg {
                                                 .friends()
                                                 .any(|f| f.other_id == other_id)
                                         {
-                                            if user_me.friendships.iter().any(|req| {
+                                            let updated = if user_me.friendships.iter().any(|req| {
                                                 req.state == BackendFriendshipState::ReqIncoming
                                                     && req.other_id == other_id
                                             }) {
@@ -390,7 +428,13 @@ pub mod msg {
                                                 true
                                             } else {
                                                 db.friendships.insert(user_me.id, other_id).await
+                                            };
+
+                                            if updated {
+                                                db.users.invalidate_cache(&user_me.id);
+                                                db.users.invalidate_cache(&other_id);
                                             }
+                                            updated
                                         } else {
                                             false
                                         }
@@ -401,9 +445,13 @@ pub mod msg {
                                             .iter()
                                             .any(|fr| fr.other_id == other_id)
                                         {
-                                            db.friendships
-                                                .remove(user_me.id, other_id.clone())
-                                                .await
+                                            let updated =
+                                                db.friendships.remove(user_me.id, other_id).await;
+                                            if updated {
+                                                db.users.invalidate_cache(&user_me.id);
+                                                db.users.invalidate_cache(&other_id);
+                                            }
+                                            updated
                                         } else {
                                             false
                                         }
