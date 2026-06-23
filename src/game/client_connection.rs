@@ -184,7 +184,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ClientConnection 
                 ctx.stop();
             }
             ws::Message::Nop => (),
-            ws::Message::Text(str_msg) => self.received_text(ctx, str_msg),
+            ws::Message::Text(str_msg) => self.received_text(ctx, str_msg.to_string()),
         }
     }
 }

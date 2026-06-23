@@ -20,7 +20,7 @@ use logging::Logger;
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:40146";
 
-#[actix_rt::main]
+#[actix_web::main]
 async fn main() {
     dotenv().expect("Failed to load .env file");
 
@@ -61,19 +61,25 @@ async fn start_server(bind_addr: &str) -> io::Result<()> {
         logger_addr.clone(),
     )
     .start();
+
+    let db_mgr = web::Data::new(db_mgr);
+    let user_mgr_addr = web::Data::new(user_mgr_addr);
+    let connection_mgr_addr = web::Data::new(connection_mgr_addr);
+    let lobby_mgr_addr = web::Data::new(lobby_mgr_addr);
+
     HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
-            .data(db_mgr.clone())
-            .data(lobby_mgr_addr.clone())
-            .data(connection_mgr_addr.clone())
-            .data(user_mgr_addr.clone())
+            .app_data(db_mgr.clone())
+            .app_data(lobby_mgr_addr.clone())
+            .app_data(connection_mgr_addr.clone())
+            .app_data(user_mgr_addr.clone())
             .route(
                 "/",
-                web::get().to(|| {
+                web::get().to(|| async {
                     HttpResponse::Found()
-                        .header("LOCATION", "/index.html")
+                        .insert_header(("LOCATION", "/index.html"))
                         .finish()
                 }),
             )
@@ -82,7 +88,7 @@ async fn start_server(bind_addr: &str) -> io::Result<()> {
                     .wrap(
                         Cors::default()
                             .allowed_origin("https://play.fourinarow.ffactory.me")
-                            .allowed_origin("localhost")
+                            .allowed_origin("http://localhost")
                             .allowed_methods(vec!["GET", "POST", "DELETE"])
                             .allow_any_header()
                             .max_age(3600),
@@ -90,19 +96,19 @@ async fn start_server(bind_addr: &str) -> io::Result<()> {
                     .configure(api::config),
             )
             .service(web::scope("/game").configure(|cfg| game::config(cfg)))
-            .service(web::resource("/privacy").to(|| {
+            .service(web::resource("/privacy").to(|| async {
                 HttpResponse::Found()
-                    .header("LOCATION", "/privacy.html")
+                    .insert_header(("LOCATION", "/privacy.html"))
                     .finish()
             }))
-            .service(fs::Files::new("/", "static/").default_handler(web::to(|| {
+            .service(fs::Files::new("/", "static/").default_handler(web::to(|| async {
                 HttpResponse::Found()
-                    .header("LOCATION", "/404.html")
+                    .insert_header(("LOCATION", "/404.html"))
                     .finish()
             })))
             .default_service(web::to(HttpResponse::NotFound))
     })
-    .keep_alive(1)
+    .keep_alive(std::time::Duration::from_secs(1))
     .bind(bind_addr)
     .expect("Failed to bind address.")
     .run()

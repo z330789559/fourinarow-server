@@ -94,7 +94,11 @@ impl ConnectionManager {
     }
 
     fn generate_session_token() -> WSSessionToken {
-        thread_rng().sample_iter(&Alphanumeric).take(32).collect()
+        thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect()
     }
 }
 

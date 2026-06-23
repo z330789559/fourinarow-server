@@ -1,19 +1,25 @@
-use mongodb::{Collection, Database};
+use sqlx::PgPool;
 
 use crate::api::users::user::PlayedGameInfo;
 
 pub struct GameCollection {
-    collection: Collection<PlayedGameInfo>,
+    pool: PgPool,
 }
 
 impl GameCollection {
-    pub fn new(db: &Database) -> Self {
-        GameCollection {
-            collection: db.collection_with_type("games"),
-        }
+    pub fn new(pool: PgPool) -> Self {
+        GameCollection { pool }
     }
 
     pub async fn insert(&self, game: PlayedGameInfo) -> bool {
-        self.collection.insert_one(game, None).await.is_ok()
+        sqlx::query(
+            "INSERT INTO games (winner_id, loser_id) VALUES ($1, $2)",
+        )
+        .bind(game.winner.to_string())
+        .bind(game.loser.to_string())
+        .execute(&self.pool)
+        .await
+        .is_ok()
     }
 }
+

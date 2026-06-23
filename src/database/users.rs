@@ -1,39 +1,63 @@
 use actix::Addr;
 use dashmap::DashMap;
-use futures::future::OptionFuture;
-use mongodb::{
-    bson::{self, doc},
-    Collection, Database,
-};
-use serde::{Deserialize, Serialize};
-use tokio::stream::StreamExt;
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use sqlx::PgPool;
 
 use super::friendships::FriendshipCollection;
 use crate::{
     api::users::{
         session_token::SessionToken,
-        user::{BackendUserMe, HashedPassword, PublicUserOther, UserGameInfo, UserId},
+        user::{BackendFriendshipsMe, BackendUserMe, HashedPassword, PublicUserOther, UserGameInfo, UserId},
         user_mgr::UserAuth,
     },
     game::client_state::ClientState,
 };
 
 pub struct UserCollection {
-    collection: Collection<DbUser>,
-    playing_users_cache: DashMap<UserId, Addr<ClientState>>,
+    pool: PgPool,
+    pub(super) playing_users_cache: DashMap<UserId, Addr<ClientState>>,
+}
+
+#[derive(sqlx::FromRow)]
+struct DbUser {
+    id: String,
+    username: String,
+    password_hash: String,
+    email: Option<String>,
+    skill_rating: i32,
+}
+
+impl DbUser {
+    fn into_backend(self, playing: Option<Addr<ClientState>>, friendships: BackendFriendshipsMe) -> Option<BackendUserMe> {
+        let user_id = UserId::from_str(&self.id)
+            .map_err(|e| log::warn!("Failed to parse user id '{}': {:?}", self.id, e))
+            .ok()?;
+        let password = HashedPassword::from_str(&self.password_hash)
+            .map_err(|e| log::warn!("Failed to parse password hash for user '{}': {:?}", self.id, e))
+            .ok()?;
+        Some(BackendUserMe {
+            id: user_id,
+            username: self.username,
+            password,
+            email: self.email,
+            game_info: UserGameInfo { skill_rating: self.skill_rating },
+            playing,
+            friendships,
+        })
+    }
 }
 
 impl UserCollection {
-    pub fn new(db: &Database) -> Self {
+    pub fn new(pool: PgPool) -> Self {
         UserCollection {
-            collection: db.collection_with_type("users"),
+            pool,
             playing_users_cache: DashMap::new(),
         }
     }
 
     async fn get_auth(
         &self,
-        auth: UserAuth,
+        auth: &UserAuth,
         friendships: &FriendshipCollection,
     ) -> Option<BackendUserMe> {
         if let Some(user) = self.get_username(&auth.username, friendships).await {
@@ -49,15 +73,25 @@ impl UserCollection {
         session_token: SessionToken,
         friendships: &FriendshipCollection,
     ) -> Option<BackendUserMe> {
-        let user: OptionFuture<_> = self
-            .collection
-            .find_one(doc! {"session_tokens": session_token.to_string() }, None)
-            .await
-            .ok()
-            .flatten()
-            .map(|user| user.to_backend_user(&self, friendships))
-            .into();
-        user.await
+        let row = sqlx::query_as::<_, DbUser>(
+            r#"
+            SELECT u.id, u.username, u.password_hash, u.email, u.skill_rating
+            FROM   users    u
+            JOIN   sessions s ON u.id = s.user_id
+            WHERE  s.token = $1
+              AND  u.deleted_at IS NULL
+            "#,
+        )
+        .bind(session_token.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()?;
+
+        let user_id = UserId::from_str(&row.id).ok()?;
+        let playing = self.playing_users_cache.get(&user_id).map(|p| p.clone());
+        let backend_friendships = friendships.get_for(user_id).await;
+        row.into_backend(playing, backend_friendships)
     }
 
     pub async fn create_session_token(
@@ -65,30 +99,31 @@ impl UserCollection {
         auth: UserAuth,
         friendships: &FriendshipCollection,
     ) -> Option<SessionToken> {
-        if let Some(user) = self.get_auth(auth, friendships).await {
-            let session_token = SessionToken::new();
-            return self
-                .collection
-                .update_one(
-                    doc! {"username": user.username},
-                    doc! { "$push": { "session_tokens": session_token.to_string() } },
-                    None,
-                )
-                .await
-                .map(|_| session_token)
-                .ok();
-        }
-        None
+        self.get_auth(&auth, friendships).await?;
+        // Re-fetch user_id from DB (already verified password above)
+        let uid: (String,) = sqlx::query_as(
+            "SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND deleted_at IS NULL",
+        )
+        .bind(&auth.username)
+        .fetch_one(&self.pool)
+        .await
+        .ok()?;
+
+        let session_token = SessionToken::new();
+        sqlx::query("INSERT INTO sessions (token, user_id) VALUES ($1, $2)")
+            .bind(session_token.to_string())
+            .bind(&uid.0)
+            .execute(&self.pool)
+            .await
+            .ok()?;
+
+        Some(session_token)
     }
 
     pub async fn remove_session_token(&self, session_token: SessionToken) -> Result<(), ()> {
-        let session_token_str = session_token.to_string();
-        self.collection
-            .update_one(
-                doc! { "session_tokens": &session_token_str },
-                doc! { "$pull": { "session_tokens": session_token_str } },
-                None,
-            )
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(session_token.to_string())
+            .execute(&self.pool)
             .await
             .map(|_| ())
             .map_err(|_| ())
@@ -99,15 +134,20 @@ impl UserCollection {
         username: &str,
         friendships: &FriendshipCollection,
     ) -> Option<BackendUserMe> {
-        let user: OptionFuture<_> = self
-            .collection
-            .find_one(doc! { "username": username }, None)
-            .await
-            .ok()
-            .flatten()
-            .map(|user| user.to_backend_user(&self, friendships))
-            .into();
-        user.await
+        let row = sqlx::query_as::<_, DbUser>(
+            "SELECT id, username, password_hash, email, skill_rating FROM users \
+             WHERE LOWER(username) = LOWER($1) AND deleted_at IS NULL",
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()?;
+
+        let user_id = UserId::from_str(&row.id).ok()?;
+        let playing = self.playing_users_cache.get(&user_id).map(|p| p.clone());
+        let backend_friendships = friendships.get_for(user_id).await;
+        row.into_backend(playing, backend_friendships)
     }
 
     pub async fn get_id(
@@ -115,62 +155,78 @@ impl UserCollection {
         id: &UserId,
         friendships: &FriendshipCollection,
     ) -> Option<BackendUserMe> {
-        let user: OptionFuture<_> = self
-            .collection
-            .find_one(doc! {"_id": id.to_string()}, None)
-            .await
-            .ok()
-            .flatten()
-            .map(|user| user.to_backend_user(&self, friendships))
-            .into();
-        user.await
+        let row = sqlx::query_as::<_, DbUser>(
+            "SELECT id, username, password_hash, email, skill_rating FROM users \
+             WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()?;
+
+        let user_id = UserId::from_str(&row.id).ok()?;
+        let playing = self.playing_users_cache.get(&user_id).map(|p| p.clone());
+        let backend_friendships = friendships.get_for(user_id).await;
+        row.into_backend(playing, backend_friendships)
     }
 
     pub async fn get_id_public(&self, id: UserId) -> Option<PublicUserOther> {
-        self.collection
-            .find_one(doc! {"_id": id.to_string()}, None)
-            .await
-            .ok()
-            .flatten()
-            .map(|user| PublicUserOther {
-                id: user.id,
-                username: user.username,
-                game_info: user.game_info,
-                playing: self.playing_users_cache.contains_key(&user.id),
-            })
+        let row: (String, String, i32) = sqlx::query_as(
+            "SELECT id, username, skill_rating FROM users WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()?;
+
+        let user_id = UserId::from_str(&row.0).ok()?;
+        Some(PublicUserOther {
+            id: user_id,
+            username: row.1,
+            game_info: UserGameInfo { skill_rating: row.2 },
+            playing: self.playing_users_cache.contains_key(&user_id),
+        })
     }
 
     pub async fn query(&self, query: &str) -> Vec<PublicUserOther> {
-        let query = query.to_lowercase();
+        let pattern = format!("%{}%", query.to_lowercase());
+        let rows: Vec<(String, String, i32)> = sqlx::query_as(
+            "SELECT id, username, skill_rating FROM users \
+             WHERE LOWER(username) LIKE $1 AND deleted_at IS NULL \
+             LIMIT 50",
+        )
+        .bind(&pattern)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
 
-        // println!("query: {} -> {:?}", query, x);
-        let users: OptionFuture<_> = self
-            .collection
-            .find(doc! {"username": {"$regex": &query}}, None)
-            .await
-            .map(|cursor| {
-                cursor
-                    .map(|result| {
-                        result.map(|user| PublicUserOther {
-                            id: user.id,
-                            username: user.username,
-                            game_info: user.game_info,
-
-                            playing: self.playing_users_cache.contains_key(&user.id),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+        rows.into_iter()
+            .filter_map(|(id_str, username, skill_rating)| {
+                UserId::from_str(&id_str).ok().map(|uid| PublicUserOther {
+                    id: uid,
+                    username,
+                    game_info: UserGameInfo { skill_rating },
+                    playing: self.playing_users_cache.contains_key(&uid),
+                })
             })
-            .ok()
-            .into();
-        users.await.map(|r| r.ok()).flatten().unwrap_or(Vec::new())
+            .collect()
     }
 
     pub async fn insert(&self, user: BackendUserMe) -> bool {
-        self.collection
-            .insert_one(DbUser::from_backend_user(user), None)
-            .await
-            .is_ok()
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, email, skill_rating) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(user.id.to_string())
+        .bind(&user.username)
+        .bind(user.password.to_string())
+        .bind(&user.email)
+        .bind(user.game_info.skill_rating)
+        .execute(&self.pool)
+        .await
+        .is_ok()
     }
 
     pub async fn update(&self, user: BackendUserMe) -> bool {
@@ -181,59 +237,145 @@ impl UserCollection {
             self.playing_users_cache.remove(&user.id);
         }
 
-        self.collection
-            .update_one(
-                doc! { "_id": user.id.to_string()},
-                doc! { "$set": bson::to_document(&DbUser::from_backend_user(user.clone())).unwrap() },
-                None,
+        sqlx::query(
+            "UPDATE users SET skill_rating = $1, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(user.game_info.skill_rating)
+        .bind(user.id.to_string())
+        .execute(&self.pool)
+        .await
+        .is_ok()
+    }
+
+    /// Find an existing user by platform identity, or create a new one, then
+    /// issue a session token.  Returns `(user_id, session_token)`.
+    pub async fn find_or_create_platform_user(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+        union_id: Option<&str>,
+        nickname: Option<&str>,
+        session_key: Option<&str>,
+    ) -> Option<(UserId, SessionToken)> {
+        // Look up existing identity
+        let maybe_uid: Option<(String,)> = sqlx::query_as(
+            "SELECT user_id FROM auth_identities WHERE provider = $1 AND provider_user_id = $2",
+        )
+        .bind(provider)
+        .bind(provider_user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let user_id_str: String = if let Some((uid,)) = maybe_uid {
+            // Refresh session_key
+            if let Some(sk) = session_key {
+                let _ = sqlx::query(
+                    "UPDATE auth_identities SET session_key = $1, updated_at = NOW() \
+                     WHERE provider = $2 AND provider_user_id = $3",
+                )
+                .bind(sk)
+                .bind(provider)
+                .bind(provider_user_id)
+                .execute(&self.pool)
+                .await;
+            }
+            uid
+        } else {
+            // Generate a unique user id (max 10 attempts before giving up)
+            let mut new_uid = UserId::new();
+            let mut id_attempts = 0u8;
+            loop {
+                let exists: Option<(bool,)> = sqlx::query_as(
+                    "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)",
+                )
+                .bind(new_uid.to_string())
+                .fetch_one(&self.pool)
+                .await
+                .ok();
+                if !exists.map(|(v,)| v).unwrap_or(true) {
+                    break;
+                }
+                id_attempts += 1;
+                if id_attempts >= 10 {
+                    log::error!("Failed to generate unique user ID after 10 attempts");
+                    return None;
+                }
+                new_uid = UserId::new();
+            }
+
+            let base_name = nickname
+                .map(|n| n.chars().take(20).collect::<String>())
+                .unwrap_or_else(|| format!("user_{}", new_uid.to_string().chars().take(6).collect::<String>()));
+            let final_name = self.make_unique_username(&base_name).await;
+
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, email, skill_rating, source_platform) \
+                 VALUES ($1, $2, '', NULL, 1000, $3)",
             )
+            .bind(new_uid.to_string())
+            .bind(&final_name)
+            .bind(provider)
+            .execute(&self.pool)
             .await
-            .is_ok()
+            .ok()?;
+
+            sqlx::query(
+                "INSERT INTO auth_identities \
+                 (user_id, provider, provider_user_id, union_id, session_key) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(new_uid.to_string())
+            .bind(provider)
+            .bind(provider_user_id)
+            .bind(union_id)
+            .bind(session_key)
+            .execute(&self.pool)
+            .await
+            .ok()?;
+
+            new_uid.to_string()
+        };
+
+        let user_id = UserId::from_str(&user_id_str).ok()?;
+        let session_token = SessionToken::new();
+        sqlx::query("INSERT INTO sessions (token, user_id) VALUES ($1, $2)")
+            .bind(session_token.to_string())
+            .bind(&user_id_str)
+            .execute(&self.pool)
+            .await
+            .ok()?;
+
+        Some((user_id, session_token))
     }
-}
 
-#[derive(Debug, Serialize, Deserialize)]
-struct DbUser {
-    #[serde(rename = "_id")]
-    pub id: UserId,
-    pub username: String,
-    pub password: HashedPassword,
-
-    #[serde(default)]
-    pub email: Option<String>,
-
-    pub game_info: UserGameInfo,
-
-    #[serde(skip)]
-    #[allow(dead_code)]
-    pub session_tokens: Vec<SessionToken>,
-}
-
-impl DbUser {
-    fn from_backend_user(user: BackendUserMe) -> Self {
-        DbUser {
-            id: user.id,
-            username: user.username,
-            password: user.password,
-            email: user.email,
-            game_info: user.game_info,
-
-            session_tokens: vec![],
+    async fn make_unique_username(&self, base: &str) -> String {
+        let mut name = base.to_string();
+        let mut counter = 1u32;
+        loop {
+            let exists: Option<(bool,)> = sqlx::query_as(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(username) = LOWER($1))",
+            )
+            .bind(&name)
+            .fetch_one(&self.pool)
+            .await
+            .ok();
+            if !exists.map(|(v,)| v).unwrap_or(true) {
+                return name;
+            }
+            counter += 1;
+            if counter > 100 {
+                // Extremely unlikely; append random suffix as last resort
+                let suffix: String = thread_rng()
+                    .sample_iter(&Alphanumeric)
+                    .take(4)
+                    .map(char::from)
+                    .collect();
+                return format!("{}_{}", base, suffix);
+            }
+            name = format!("{}_{}", base, counter);
         }
     }
-    async fn to_backend_user(
-        self,
-        users: &UserCollection,
-        friendships: &FriendshipCollection,
-    ) -> BackendUserMe {
-        BackendUserMe {
-            id: self.id,
-            username: self.username,
-            password: self.password,
-            email: self.email,
-            game_info: self.game_info,
-            playing: users.playing_users_cache.get(&self.id).map(|p| p.clone()),
-            friendships: friendships.get_for(self.id).await,
-        }
-    }
 }
+

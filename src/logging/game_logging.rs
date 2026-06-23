@@ -1,12 +1,18 @@
 use actix::Message;
-use mongodb::bson::oid::ObjectId;
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
 
 #[derive(Clone)]
-pub struct GameOId(ObjectId);
+pub struct GameOId(String);
 
 impl GameOId {
     pub fn new() -> Self {
-        GameOId(ObjectId::new())
+        GameOId(
+            thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(24)
+                .map(char::from)
+                .collect(),
+        )
     }
 }
 pub enum GameEndReason {

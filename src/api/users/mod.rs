@@ -107,7 +107,6 @@ async fn get_user(
         _ => ApiResponse::from(ApiError::InternalServerError),
     }
 }
-
 async fn me(req: HttpRequest, user_mgr: web::Data<Addr<user_mgr::UserManager>>) -> HR {
     match get_session_token(&req) {
         Some(session_token) => match user_mgr.send(user_mgr::msg::GetUserMe(session_token)).await {
@@ -146,7 +145,7 @@ mod friends {
         user_mgr: web::Data<Addr<user_mgr::UserManager>>,
         id: web::Path<UserId>,
     ) -> HR {
-        modify(req, FriendsAction::Delete(id.0), user_mgr.get_ref()).await
+        modify(req, FriendsAction::Delete(id.into_inner()), user_mgr.get_ref()).await
     }
 
     async fn modify(
