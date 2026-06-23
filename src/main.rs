@@ -1,7 +1,9 @@
 mod api;
 mod database;
 mod game;
+mod items;
 mod logging;
+mod quests;
 
 use std::io;
 use std::sync::Arc;
@@ -101,11 +103,13 @@ async fn start_server(bind_addr: &str) -> io::Result<()> {
                     .insert_header(("LOCATION", "/privacy.html"))
                     .finish()
             }))
-            .service(fs::Files::new("/", "static/").default_handler(web::to(|| async {
-                HttpResponse::Found()
-                    .insert_header(("LOCATION", "/404.html"))
-                    .finish()
-            })))
+            .service(
+                fs::Files::new("/", "static/").default_handler(web::to(|| async {
+                    HttpResponse::Found()
+                        .insert_header(("LOCATION", "/404.html"))
+                        .finish()
+                })),
+            )
             .default_service(web::to(HttpResponse::NotFound))
     })
     .keep_alive(std::time::Duration::from_secs(1))
