@@ -1,9 +1,12 @@
 pub mod chat_msg;
 pub mod friendships;
 pub mod games;
+pub mod inbox;
 pub mod invites;
 pub mod items;
 pub mod leaderboard;
+pub mod minigame_config;
+pub mod notifications;
 pub mod quests;
 pub mod users;
 

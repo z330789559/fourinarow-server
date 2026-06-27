@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use actix_web::{web, HttpRequest, HttpResponse};
 
-use crate::{api::get_session_token, database::items::InventoryEntry, database::DatabaseManager};
+use crate::{
+    api::get_session_token,
+    database::{items::InventoryEntry, notifications::{set_badge, MODULE_QUESTS}, DatabaseManager},
+    logging::{ActivityEvent, ActivityEventKind, ActivityLogHandle},
+};
 
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.route("", web::get().to(get_inventory))
@@ -41,6 +45,7 @@ async fn get_shop(db: web::Data<Arc<DatabaseManager>>, shop_id: web::Path<String
 async fn buy_item(
     req: HttpRequest,
     db: web::Data<Arc<DatabaseManager>>,
+    activity_log: web::Data<ActivityLogHandle>,
     path: web::Path<(String, String)>,
 ) -> HttpResponse {
     let (shop_id, item_id) = path.into_inner();
@@ -66,7 +71,17 @@ async fn buy_item(
         .purchase(&user.id, &shop_id, &item_id, request_id)
         .await
     {
-        Ok(()) => HttpResponse::Ok().finish(),
+        Ok(completed_quests) => {
+            activity_log.record(ActivityEvent::new(
+                Some(user.id.to_string()),
+                ActivityEventKind::Purchase,
+                Some(serde_json::json!({ "shop_id": shop_id, "item_id": item_id })),
+            ));
+            if !completed_quests.is_empty() {
+                set_badge(&db.pool, &user.id, MODULE_QUESTS).await;
+            }
+            HttpResponse::Ok().finish()
+        }
         Err(crate::player::PurchaseError::NotEnoughItems) => {
             HttpResponse::BadRequest().body("Not enough items")
         }

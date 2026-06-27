@@ -3,10 +3,12 @@ use std::sync::Arc;
 use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::Utc;
 use serde::Serialize;
+use serde_json;
 
 use crate::{
     api::get_session_token,
-    database::{quests::QuestProgress, DatabaseManager},
+    database::DatabaseManager,
+    logging::{ActivityEvent, ActivityEventKind, ActivityLogHandle},
     player::{QuestClaimError, QuestClaimKind, QuestClaimReward},
 };
 
@@ -49,28 +51,10 @@ async fn story_progress(req: HttpRequest, db: web::Data<Arc<DatabaseManager>>) -
         return HttpResponse::Unauthorized().finish();
     };
 
-    match db.players.get_readonly(&user.id).await {
-        Ok(player) => {
-            let progress = player
-                .quests
-                .into_iter()
-                .filter(|quest| quest.quest_date.is_none())
-                .map(|quest| QuestProgress {
-                    quest_id: quest.quest_id,
-                    current_value: quest.current_value,
-                    completed_at: quest.completed_at,
-                    rewarded: quest.rewarded,
-                    quest_date: quest.quest_date,
-                })
-                .collect::<Vec<_>>();
-            HttpResponse::Ok().json(progress)
-        }
+    match db.players.story_quest_progress(&user.id).await {
+        Ok(progress) => HttpResponse::Ok().json(progress),
         Err(error) => {
-            log::error!(
-                "failed to load story quest progress {}: {:?}",
-                user.id,
-                error
-            );
+            log::error!("failed to load story quest progress {}: {:?}", user.id, error);
             HttpResponse::InternalServerError().finish()
         }
     }
@@ -84,29 +68,11 @@ async fn daily_progress(req: HttpRequest, db: web::Data<Arc<DatabaseManager>>) -
         return HttpResponse::Unauthorized().finish();
     };
 
-    match db.players.get_readonly(&user.id).await {
-        Ok(player) => {
-            let today = Utc::now().date_naive();
-            let progress = player
-                .quests
-                .into_iter()
-                .filter(|quest| quest.quest_date == Some(today))
-                .map(|quest| QuestProgress {
-                    quest_id: quest.quest_id,
-                    current_value: quest.current_value,
-                    completed_at: quest.completed_at,
-                    rewarded: quest.rewarded,
-                    quest_date: quest.quest_date,
-                })
-                .collect::<Vec<_>>();
-            HttpResponse::Ok().json(progress)
-        }
+    let today = Utc::now().date_naive();
+    match db.players.daily_quest_progress(&user.id, today).await {
+        Ok(progress) => HttpResponse::Ok().json(progress),
         Err(error) => {
-            log::error!(
-                "failed to load daily quest progress {}: {:?}",
-                user.id,
-                error
-            );
+            log::error!("failed to load daily quest progress {}: {:?}", user.id, error);
             HttpResponse::InternalServerError().finish()
         }
     }
@@ -123,52 +89,76 @@ async fn achievement_progress(
         return HttpResponse::Unauthorized().finish();
     };
 
-    match db.players.get_readonly(&user.id).await {
-        Ok(player) => {
-            let response: Vec<serde_json::Value> = player
-                .achievements
-                .into_iter()
-                .map(|achievement| {
-                    serde_json::json!({
-                        "achievement_id": achievement.achievement_id,
-                        "current_tier": achievement.current_tier,
-                        "current_value": achievement.current_value,
-                    })
-                })
-                .collect();
-
-            HttpResponse::Ok().json(response)
-        }
+    let player = match db.players.get_readonly(&user.id).await {
+        Ok(p) => p,
         Err(error) => {
-            log::error!(
-                "failed to load achievement progress {}: {:?}",
-                user.id,
-                error
-            );
-            HttpResponse::InternalServerError().finish()
+            log::error!("failed to load achievement progress {}: {:?}", user.id, error);
+            return HttpResponse::InternalServerError().finish();
         }
+    };
+    let progressive = match db.players.get_progressive_achievement_progress(&user.id).await {
+        Ok(p) => p,
+        Err(error) => {
+            log::error!("failed to load progressive achievements {}: {:?}", user.id, error);
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    let mut response: Vec<serde_json::Value> = player
+        .achievements
+        .into_iter()
+        .map(|a| {
+            serde_json::json!({
+                "kind": "tiered",
+                "achievement_id": a.achievement_id,
+                "current_tier": a.current_tier,
+                "current_value": a.current_value,
+            })
+        })
+        .collect();
+
+    for p in progressive {
+        let reward_preview: Vec<serde_json::Value> = p
+            .reward_preview
+            .into_iter()
+            .map(|(item_id, amount)| serde_json::json!({"item_id": item_id, "amount": amount}))
+            .collect();
+        response.push(serde_json::json!({
+            "kind": "progressive",
+            "achievement_id": p.achievement_id,
+            "name": p.name,
+            "mode": p.mode,
+            "step": p.step,
+            "current_target_level": p.current_target_level,
+            "reward_preview": reward_preview,
+        }));
     }
+
+    HttpResponse::Ok().json(response)
 }
 
 async fn claim_story_reward(
     req: HttpRequest,
     db: web::Data<Arc<DatabaseManager>>,
+    activity_log: web::Data<ActivityLogHandle>,
     quest_id: web::Path<String>,
 ) -> HttpResponse {
-    claim_reward(req, db, QuestClaimKind::Story, quest_id.into_inner()).await
+    claim_reward(req, db, activity_log, QuestClaimKind::Story, quest_id.into_inner()).await
 }
 
 async fn claim_daily_reward(
     req: HttpRequest,
     db: web::Data<Arc<DatabaseManager>>,
+    activity_log: web::Data<ActivityLogHandle>,
     quest_id: web::Path<String>,
 ) -> HttpResponse {
-    claim_reward(req, db, QuestClaimKind::Daily, quest_id.into_inner()).await
+    claim_reward(req, db, activity_log, QuestClaimKind::Daily, quest_id.into_inner()).await
 }
 
 async fn claim_reward(
     req: HttpRequest,
     db: web::Data<Arc<DatabaseManager>>,
+    activity_log: web::Data<ActivityLogHandle>,
     kind: QuestClaimKind,
     quest_id: String,
 ) -> HttpResponse {
@@ -184,7 +174,14 @@ async fn claim_reward(
         .claim_quest_reward(&user.id, kind, &quest_id)
         .await
     {
-        Ok(reward) => HttpResponse::Ok().json(QuestClaimResp::from(reward)),
+        Ok(reward) => {
+            activity_log.record(ActivityEvent::new(
+                Some(user.id.to_string()),
+                ActivityEventKind::ClaimReward,
+                Some(serde_json::json!({ "quest_id": quest_id })),
+            ));
+            HttpResponse::Ok().json(QuestClaimResp::from(reward))
+        }
         Err(QuestClaimError::NotFound) => HttpResponse::NotFound().body("Quest reward not found"),
         Err(QuestClaimError::NotCompleted) => {
             HttpResponse::BadRequest().body("Quest is not completed")

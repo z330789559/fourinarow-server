@@ -8,6 +8,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tokio::time::{self, Duration};
 
 use crate::api::users::user::{UserGameInfo, UserId};
+use crate::config::GameConfig;
 use crate::database::items::InventoryEntry;
 use crate::player::aggregate::{
     DirtyBucket, PlayerAchievementProgress, PlayerAggregate, PlayerCacheEntry, PlayerProfile,
@@ -117,10 +118,38 @@ impl From<sqlx::Error> for SettlementError {
     }
 }
 
+#[derive(Debug)]
+pub enum CompleteLevelError {
+    ModeNotUnlocked,
+    NotNextLevel,
+    InvalidStars,
+    ModeMissing,
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for CompleteLevelError {
+    fn from(error: sqlx::Error) -> Self {
+        CompleteLevelError::Db(error)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompleteLevelOutcome {
+    pub new_level: i32,
+    pub rewards: Vec<(String, i32)>,
+    pub achievements: Vec<(String, i32)>,
+    pub milestones: Vec<(String, i32, i64)>,    // (achievement_id, step_reached, inbox_id)
+    pub completed_quests: Vec<(String, String)>, // (quest_id, quest_type)
+}
+
 #[derive(Debug, Clone)]
 pub struct SettlementOutcome {
     pub winner_rewards: Vec<(String, i32)>,
     pub loser_rewards: Vec<(String, i32)>,
+    /// Achievement tiers newly completed by the winner: (achievement_id, tier_completed)
+    pub winner_achievements: Vec<(String, i32)>,
+    pub winner_completed_quests: Vec<(String, String)>,
+    pub loser_completed_quests: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -551,6 +580,14 @@ impl PlayerRepository {
 
         let stats = load_or_create_stats(&self.pool, user_id).await?;
 
+        let progress_rows: Vec<(i32, i32)> = sqlx::query_as(
+            "SELECT mode, level FROM player_mode_progress WHERE user_id = $1",
+        )
+        .bind(user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mode_progress: BTreeMap<i32, i32> = progress_rows.into_iter().collect();
+
         Ok(PlayerAggregate {
             profile: PlayerProfile {
                 id: parsed_id,
@@ -562,6 +599,7 @@ impl PlayerRepository {
             quests,
             achievements,
             stats,
+            mode_progress,
         })
     }
 
@@ -618,7 +656,7 @@ impl PlayerRepository {
         shop_id: &str,
         item_id: &str,
         request_id: Option<&str>,
-    ) -> Result<(), PurchaseError> {
+    ) -> Result<Vec<(String, String)>, PurchaseError> {
         self.flush_player(user_id)
             .await
             .map_err(PurchaseError::CacheFlush)?;
@@ -697,10 +735,26 @@ impl PlayerRepository {
             .await?;
         }
 
+        let purchase_quest_prefix = format!("purchase_quest:{shop_id}:{item_id}");
+        let (_, _, completed_quests) = apply_quest_event_in_tx(&mut tx, user_id, &GameEvent::ItemPurchased, &purchase_quest_prefix).await?;
+
         tx.commit().await?;
         self.reload_player_after_sync_write(user_id, "purchase")
             .await;
-        Ok(())
+        Ok(completed_quests)
+    }
+
+    pub async fn trigger_quest_event(
+        &self,
+        user_id: &UserId,
+        event: GameEvent,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let (_, _, completed_quests) = apply_quest_event_in_tx(&mut tx, user_id, &event, prefix).await?;
+        tx.commit().await?;
+        self.cache.remove(user_id);
+        Ok(completed_quests)
     }
 
     pub async fn redeem_invite(
@@ -957,6 +1011,9 @@ impl PlayerRepository {
             return Ok(SettlementOutcome {
                 winner_rewards: Vec::new(),
                 loser_rewards: Vec::new(),
+                winner_achievements: Vec::new(),
+                winner_completed_quests: Vec::new(),
+                loser_completed_quests: Vec::new(),
             });
         }
 
@@ -1002,22 +1059,32 @@ impl PlayerRepository {
             .await?;
 
         let mut winner_rewards = Vec::new();
-        winner_rewards.extend(
+        let mut winner_achievements: Vec<(String, i32)> = Vec::new();
+        let mut winner_completed_quests: Vec<(String, String)> = Vec::new();
+        let mut loser_completed_quests: Vec<(String, String)> = Vec::new();
+
+        let (wr1, wa1, cq1) =
             apply_quest_event_in_tx(&mut tx, winner_id, &GameEvent::GameWon, "game_settlement")
-                .await?,
-        );
-        winner_rewards.extend(
-            apply_quest_event_in_tx(
-                &mut tx,
-                winner_id,
-                &GameEvent::GamePlayed,
-                "game_settlement",
-            )
-            .await?,
-        );
-        let loser_rewards =
+                .await?;
+        winner_rewards.extend(wr1);
+        winner_achievements.extend(wa1);
+        winner_completed_quests.extend(cq1);
+
+        let (wr2, wa2, cq2) = apply_quest_event_in_tx(
+            &mut tx,
+            winner_id,
+            &GameEvent::GamePlayed,
+            "game_settlement",
+        )
+        .await?;
+        winner_rewards.extend(wr2);
+        winner_achievements.extend(wa2);
+        winner_completed_quests.extend(cq2);
+
+        let (loser_rewards, _, loser_cq) =
             apply_quest_event_in_tx(&mut tx, loser_id, &GameEvent::GamePlayed, "game_settlement")
                 .await?;
+        loser_completed_quests.extend(loser_cq);
 
         tx.commit().await?;
         self.bump_stats(winner_id, 1, 1, 0, "game_settlement")
@@ -1030,7 +1097,114 @@ impl PlayerRepository {
         Ok(SettlementOutcome {
             winner_rewards,
             loser_rewards,
+            winner_achievements,
+            winner_completed_quests,
+            loser_completed_quests,
         })
+    }
+
+    /// Task 5.8: Lazy backfill — inserts level=0 rows for every mode that has no row yet.
+    /// Called from StartGame and complete_level; also used by Task 5.3 on registration.
+    pub async fn ensure_mode_progress(
+        &self,
+        user_id: &UserId,
+        game_config: &GameConfig,
+    ) -> Result<(), sqlx::Error> {
+        for mode_cfg in &game_config.modes {
+            sqlx::query(
+                "INSERT INTO player_mode_progress (user_id, mode, level, updated_at) \
+                 VALUES ($1, $2, 0, NOW()) ON CONFLICT (user_id, mode) DO NOTHING",
+            )
+            .bind(user_id.to_string())
+            .bind(mode_cfg.mode)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Task 5.6: Complete a level in a mode. Validates, updates progress, and applies quest/reward
+    /// events transactionally. Returns CompleteLevelOutcome with new level and any earned rewards.
+    pub async fn complete_level(
+        &self,
+        user_id: &UserId,
+        mode: i32,
+        level_id: i32,
+        stars: i32,
+    ) -> Result<CompleteLevelOutcome, CompleteLevelError> {
+        if !(1..=3).contains(&stars) {
+            return Err(CompleteLevelError::InvalidStars);
+        }
+
+        let idempotency_key = format!("level_complete:{user_id}:{mode}:{level_id}");
+        let mut tx = self.pool.begin().await?;
+
+        let inserted = insert_idempotency(
+            &mut tx,
+            user_id,
+            "level_complete",
+            &idempotency_key,
+            &idempotency_key,
+        )
+        .await?;
+        if !inserted {
+            tx.rollback().await?;
+            return Ok(CompleteLevelOutcome { new_level: level_id, rewards: vec![], achievements: vec![], milestones: vec![], completed_quests: vec![] });
+        }
+
+        let maybe_current: Option<(i32,)> = sqlx::query_as(
+            "SELECT level FROM player_mode_progress WHERE user_id = $1 AND mode = $2 FOR UPDATE",
+        )
+        .bind(user_id.to_string())
+        .bind(mode)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let current_level = match maybe_current {
+            Some((lvl,)) => lvl,
+            None => {
+                tx.rollback().await?;
+                return Err(CompleteLevelError::ModeMissing);
+            }
+        };
+
+        if level_id != current_level + 1 {
+            tx.rollback().await?;
+            return Err(CompleteLevelError::NotNextLevel);
+        }
+
+        sqlx::query(
+            "UPDATE player_mode_progress SET level = $1, updated_at = NOW() \
+             WHERE user_id = $2 AND mode = $3",
+        )
+        .bind(level_id)
+        .bind(user_id.to_string())
+        .bind(mode)
+        .execute(&mut *tx)
+        .await?;
+
+        // Apply quest progress and collect any in-tx rewards from quest/achievement unlocks
+        let business_prefix = format!("level_complete:{mode}:{level_id}");
+        let (rewards, achievements, completed_quests) =
+            apply_quest_event_in_tx(&mut tx, user_id, &GameEvent::LevelCompleted, &business_prefix)
+                .await?;
+
+        // Check infinite progressive achievements for this mode — rewards go to inbox
+        let milestones = check_progressive_achievements_in_tx(
+            &mut tx,
+            user_id,
+            mode,
+            level_id,
+            &business_prefix,
+        )
+        .await?;
+
+        tx.commit().await?;
+
+        // Evict from cache so next read reloads updated mode_progress
+        self.cache.remove(user_id);
+
+        Ok(CompleteLevelOutcome { new_level: level_id, rewards, achievements, milestones, completed_quests })
     }
 }
 
@@ -1057,6 +1231,206 @@ async fn load_or_create_stats(pool: &PgPool, user_id: &UserId) -> Result<PlayerS
         .await?;
 
     Ok(PlayerStats::default())
+}
+
+// ─── 渐进成就 ─────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct ProgressiveRewardConfig {
+    #[serde(rename = "itemId")]
+    item_id: String,
+    count: i32,
+    coefficient: i32,
+}
+
+pub struct ProgressiveAchievementState {
+    pub achievement_id: String,
+    pub name: String,
+    pub mode: i32,
+    pub step: i32,
+    pub current_target_level: i32,
+    pub reward_preview: Vec<(String, i32)>,
+}
+
+async fn check_progressive_achievements_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &UserId,
+    mode: i32,
+    new_level: i32,
+    _business_prefix: &str,
+) -> Result<Vec<(String, i32, i64)>, sqlx::Error> {
+    let row: Option<(String, String, i32, i32, String)> = sqlx::query_as(
+        "SELECT id, name, init, gap, rewards::text FROM achievement_progressive WHERE mode = $1",
+    )
+    .bind(mode)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let Some((achievement_id, achievement_name, init, gap, rewards_json)) = row else {
+        return Ok(vec![]);
+    };
+
+    let reward_cfgs: Vec<ProgressiveRewardConfig> =
+        serde_json::from_str(&rewards_json).unwrap_or_default();
+
+    let step: i32 = sqlx::query_scalar(
+        "INSERT INTO user_progressive_achievement_progress (user_id, achievement_id, step) \
+         VALUES ($1, $2, 0) \
+         ON CONFLICT (user_id, achievement_id) DO UPDATE \
+         SET step = user_progressive_achievement_progress.step \
+         RETURNING step",
+    )
+    .bind(user_id.to_string())
+    .bind(&achievement_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    let mut current_step = step;
+    let mut milestones: Vec<(String, i32, i64)> = vec![];
+
+    loop {
+        let threshold = (init + current_step) * gap;
+        if new_level < threshold {
+            break;
+        }
+        // Each milestone reward goes to inbox (one inbox message per reward item)
+        for cfg in &reward_cfgs {
+            let amount = (current_step + 1) * cfg.coefficient * cfg.count;
+            let title = format!("{}达成！通关第{}关里程碑", achievement_name, threshold);
+            let (inbox_id,): (i64,) = sqlx::query_as(
+                "INSERT INTO user_inbox (user_id, type, title, body, reward_item_id, reward_qty) \
+                 VALUES ($1, 'progressive_achievement', $2, '', $3, $4) RETURNING id",
+            )
+            .bind(user_id.to_string())
+            .bind(&title)
+            .bind(&cfg.item_id)
+            .bind(amount)
+            .fetch_one(&mut **tx)
+            .await?;
+            milestones.push((achievement_id.clone(), current_step + 1, inbox_id));
+        }
+        current_step += 1;
+    }
+
+    if current_step > step {
+        sqlx::query(
+            "UPDATE user_progressive_achievement_progress SET step = $1 \
+             WHERE user_id = $2 AND achievement_id = $3",
+        )
+        .bind(current_step)
+        .bind(user_id.to_string())
+        .bind(&achievement_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(milestones)
+}
+
+impl PlayerRepository {
+    pub async fn story_quest_progress(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Vec<crate::database::quests::QuestProgress>, sqlx::Error> {
+        let rows: Vec<(String, i32, Option<DateTime<Utc>>, bool)> = sqlx::query_as(
+            "SELECT q.id, COALESCE(uqp.current_value, 0), uqp.completed_at, \
+             COALESCE(uqp.rewarded, false) \
+             FROM quests q \
+             LEFT JOIN user_quest_progress uqp \
+               ON q.id = uqp.quest_id AND uqp.user_id = $1 AND uqp.quest_date IS NULL \
+             WHERE q.quest_type = 'story' \
+             ORDER BY q.sort_order ASC",
+        )
+        .bind(user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(quest_id, current_value, completed_at, rewarded)| {
+                crate::database::quests::QuestProgress {
+                    quest_id,
+                    current_value,
+                    completed_at,
+                    rewarded,
+                    quest_date: None,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn daily_quest_progress(
+        &self,
+        user_id: &UserId,
+        today: NaiveDate,
+    ) -> Result<Vec<crate::database::quests::QuestProgress>, sqlx::Error> {
+        let rows: Vec<(String, i32, Option<DateTime<Utc>>, bool)> = sqlx::query_as(
+            "SELECT q.id, COALESCE(uqp.current_value, 0), uqp.completed_at, \
+             COALESCE(uqp.rewarded, false) \
+             FROM quests q \
+             LEFT JOIN user_quest_progress uqp \
+               ON q.id = uqp.quest_id AND uqp.user_id = $1 AND uqp.quest_date = $2 \
+             WHERE q.quest_type = 'daily' \
+             ORDER BY q.sort_order ASC",
+        )
+        .bind(user_id.to_string())
+        .bind(today)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(quest_id, current_value, completed_at, rewarded)| {
+                crate::database::quests::QuestProgress {
+                    quest_id,
+                    current_value,
+                    completed_at,
+                    rewarded,
+                    quest_date: Some(today),
+                }
+            })
+            .collect())
+    }
+
+    pub async fn get_progressive_achievement_progress(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Vec<ProgressiveAchievementState>, sqlx::Error> {
+        let rows: Vec<(String, String, i32, i32, i32, String, i32)> = sqlx::query_as(
+            "SELECT ap.id, ap.name, ap.mode, ap.gap, ap.init, ap.rewards::text, \
+             COALESCE(up.step, 0) \
+             FROM achievement_progressive ap \
+             LEFT JOIN user_progressive_achievement_progress up \
+               ON ap.id = up.achievement_id AND up.user_id = $1 \
+             ORDER BY ap.mode ASC",
+        )
+        .bind(user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let states = rows
+            .into_iter()
+            .map(|(id, name, mode, gap, init, rewards_json, step)| {
+                let reward_cfgs: Vec<ProgressiveRewardConfig> =
+                    serde_json::from_str(&rewards_json).unwrap_or_default();
+                let current_target_level = (init + step) * gap;
+                let reward_preview = reward_cfgs
+                    .iter()
+                    .map(|cfg| (cfg.item_id.clone(), (step + 1) * cfg.coefficient * cfg.count))
+                    .collect();
+                ProgressiveAchievementState {
+                    achievement_id: id,
+                    name,
+                    mode,
+                    step,
+                    current_target_level,
+                    reward_preview,
+                }
+            })
+            .collect();
+
+        Ok(states)
+    }
 }
 
 async fn insert_idempotency(
@@ -1159,31 +1533,44 @@ async fn consume_inventory_in_tx(
     Ok(result.rows_affected() > 0)
 }
 
+/// Returns `(item_rewards, unlocked_achievements, completed_quests)`.
+/// `completed_quests` is `Vec<(quest_id, quest_type)>`.
 async fn apply_quest_event_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &UserId,
     event: &GameEvent,
     business_prefix: &str,
-) -> Result<Vec<(String, i32)>, sqlx::Error> {
+) -> Result<(Vec<(String, i32)>, Vec<(String, i32)>, Vec<(String, String)>), sqlx::Error> {
     let mut rewards = Vec::new();
+    let mut unlocked_achievements: Vec<(String, i32)> = Vec::new();
+    let mut completed_quests: Vec<(String, String)> = Vec::new();
     let condition = event.condition_type();
     let today = Utc::now().date_naive();
 
     let story_quests = load_quests_for_condition(tx, "story", condition).await?;
     for quest in story_quests {
-        let _ = apply_story_quest_in_tx(tx, user_id, &quest).await?;
+        let done = apply_story_quest_in_tx(tx, user_id, &quest).await?;
+        if done {
+            completed_quests.push((quest.id.clone(), "story".to_string()));
+        }
     }
 
     let daily_quests = load_quests_for_condition(tx, "daily", condition).await?;
     for quest in daily_quests {
-        let _ = apply_daily_quest_in_tx(tx, user_id, &quest, today).await?;
+        let done = apply_daily_quest_in_tx(tx, user_id, &quest, today).await?;
+        if done {
+            completed_quests.push((quest.id.clone(), "daily".to_string()));
+        }
     }
 
     if matches!(event, GameEvent::GameWon) {
-        rewards.extend(apply_achievements_in_tx(tx, user_id, business_prefix).await?);
+        let (item_rewards, achieved) =
+            apply_achievements_in_tx(tx, user_id, business_prefix).await?;
+        rewards.extend(item_rewards);
+        unlocked_achievements.extend(achieved);
     }
 
-    Ok(rewards)
+    Ok((rewards, unlocked_achievements, completed_quests))
 }
 
 async fn load_quests_for_condition(
@@ -1347,12 +1734,15 @@ async fn apply_daily_quest_in_tx(
     }
 }
 
+/// Returns `(item_rewards, unlocked_achievements)` where unlocked_achievements is
+/// a list of `(achievement_id, completed_tier)` for tiers newly completed this call.
 async fn apply_achievements_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &UserId,
     business_prefix: &str,
-) -> Result<Vec<(String, i32)>, sqlx::Error> {
+) -> Result<(Vec<(String, i32)>, Vec<(String, i32)>), sqlx::Error> {
     let mut rewards = Vec::new();
+    let mut unlocked_achievements: Vec<(String, i32)> = Vec::new();
     let achievements: Vec<String> = sqlx::query_as::<_, (String,)>(
         "SELECT DISTINCT achievement_id FROM achievement_tiers WHERE tier = 1 AND condition_value > 0",
     )
@@ -1421,6 +1811,8 @@ async fn apply_achievements_in_tx(
             .execute(&mut **tx)
             .await?;
 
+            unlocked_achievements.push((achievement_id.clone(), current_tier));
+
             if let Some((item_id, qty)) = reward_tuple(reward_item_id.as_deref(), reward_quantity) {
                 let business_id =
                     format!("{business_prefix}:achievement:{achievement_id}:{current_tier}");
@@ -1447,7 +1839,7 @@ async fn apply_achievements_in_tx(
         }
     }
 
-    Ok(rewards)
+    Ok((rewards, unlocked_achievements))
 }
 
 fn reward_tuple(reward_item_id: Option<&str>, reward_quantity: i32) -> Option<(String, i32)> {
@@ -1477,6 +1869,7 @@ mod tests {
             quests: Vec::new(),
             achievements: Vec::new(),
             stats: PlayerStats::default(),
+            mode_progress: BTreeMap::new(),
         }
     }
 

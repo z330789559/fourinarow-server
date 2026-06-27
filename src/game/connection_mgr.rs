@@ -9,7 +9,11 @@ use super::{
     lobby_mgr::LobbyManager,
     ClientConnection,
 };
-use crate::{api::users::user_mgr::UserManager, game::msg::ServerMessage, logging::Logger};
+use crate::{
+    api::users::{user::UserId, user_mgr::UserManager},
+    game::msg::{GameMsgOut, ServerMessage},
+    logging::{ActivityEvent, ActivityEventKind, ActivityLogHandle, Logger},
+};
 
 pub type WSSessionToken = String;
 
@@ -25,16 +29,21 @@ enum BacklinkState {
 pub struct ConnectionManager {
     lobby_mgr_state: BacklinkState,
     connections: HashMap<WSSessionToken, Connection>,
+    /// Presence mapping: user_id → (ws_session_token, api_session_token_str)
+    user_to_session: HashMap<UserId, (WSSessionToken, String)>,
+    activity_log: ActivityLogHandle,
     player_in_queue: bool,
     send_server_info_batched: bool,
     logger: Addr<Logger>,
 }
 
 impl ConnectionManager {
-    pub fn new(logger: Addr<Logger>) -> Self {
+    pub fn new(logger: Addr<Logger>, activity_log: ActivityLogHandle) -> Self {
         ConnectionManager {
             lobby_mgr_state: BacklinkState::Unlinked,
             connections: HashMap::new(),
+            user_to_session: HashMap::new(),
+            activity_log,
             player_in_queue: false,
             send_server_info_batched: false,
             logger,
@@ -71,8 +80,17 @@ impl ConnectionManager {
 
             for (id, connection) in connections_to_remove {
                 connection.adapter_addr.do_send(ClientAdapterMsg::Close);
+                // Task 3.4: clean up presence mapping and log offline event
+                if let Some(uid) = connection.user_id {
+                    if act.user_to_session.remove(&uid).is_some() {
+                        act.activity_log.record(ActivityEvent::new(
+                            Some(uid.to_string()),
+                            ActivityEventKind::Offline,
+                            None,
+                        ));
+                    }
+                }
                 act.connections.remove(&id);
-                println!("Connection {} timeouted", id);
                 act.send_server_info_batched = true;
             }
         });
@@ -113,6 +131,8 @@ struct Connection {
     adapter_addr: Addr<ClientAdapter>,
     state_addr: Addr<ClientState>,
     state: ConnectionState,
+    /// Set after BindUser; used by timeout cleanup (Task 3.1a / 3.4)
+    user_id: Option<UserId>,
 }
 
 pub enum ConnectionManagerMsg {
@@ -128,6 +148,48 @@ pub enum ConnectionManagerMsg {
     RequestAdapterNew(NewAdapterAdresses), // sent when client first connects
     RequestAdapterExisting(NewAdapterAdresses, String), // sent when client reconnects
     RequestAdapterLegacy(NewAdapterAdresses, Option<String>), // sent when legacy client first connects with playerMsgStr in "queue"
+    /// Task 3.1/3.2: bind a logged-in user to this WS connection (one-account-one-connection)
+    BindUser {
+        user_id: UserId,
+        api_session_token_str: String,
+        ws_session_token: WSSessionToken,
+    },
+    /// Task 3.2: token-guarded unbind; ignored if token doesn't match current mapping
+    UnbindUser {
+        user_id: UserId,
+        api_session_token_str: String,
+    },
+}
+
+/// Task 3.5: query whether a user is currently online
+pub struct IsOnline(pub UserId);
+impl Message for IsOnline {
+    type Result = bool;
+}
+impl Handler<IsOnline> for ConnectionManager {
+    type Result = bool;
+    fn handle(&mut self, msg: IsOnline, _ctx: &mut Context<Self>) -> bool {
+        self.user_to_session.contains_key(&msg.0)
+    }
+}
+
+/// Task 4.1: push a game sub-protocol message to a user; silently dropped if user is offline
+pub struct PushToUser {
+    pub user_id: UserId,
+    pub msg: GameMsgOut,
+}
+impl Message for PushToUser {
+    type Result = ();
+}
+impl Handler<PushToUser> for ConnectionManager {
+    type Result = ();
+    fn handle(&mut self, push: PushToUser, _ctx: &mut Context<Self>) {
+        if let Some((ws_token, _)) = self.user_to_session.get(&push.user_id) {
+            if let Some(conn) = self.connections.get(ws_token) {
+                conn.state_addr.do_send(ServerMessage::GameProtocol(push.msg));
+            }
+        }
+    }
 }
 
 pub struct NewAdapterAdresses {
@@ -224,6 +286,7 @@ impl Handler<ConnectionManagerMsg> for ConnectionManager {
                         state: ConnectionState::Connected(
                             new_adapter_addresses.client_conn.clone(),
                         ),
+                        user_id: None,
                     },
                 );
                 new_adapter_addresses
@@ -288,6 +351,7 @@ impl Handler<ConnectionManagerMsg> for ConnectionManager {
                         state: ConnectionState::Connected(
                             new_adapter_addresses.client_conn.clone(),
                         ),
+                        user_id: None,
                     },
                 );
                 // Backlink
@@ -302,6 +366,35 @@ impl Handler<ConnectionManagerMsg> for ConnectionManager {
                     client_adapter.do_send(ClientMsgString(str_msg));
                 }
                 self.send_server_info_batched = true;
+            }
+
+            // Task 3.1/3.2: bind user to this WS connection, kicking any previous connection
+            BindUser { user_id, api_session_token_str, ws_session_token } => {
+                // Kick old connection if same user logged in elsewhere
+                if let Some((old_ws_token, _)) = self.user_to_session.remove(&user_id) {
+                    if let Some(old_conn) = self.connections.get_mut(&old_ws_token) {
+                        old_conn.user_id = None; // prevent double Offline log on timeout
+                        old_conn.adapter_addr.do_send(ClientAdapterMsg::Close);
+                    }
+                }
+                // Install new presence mapping
+                self.user_to_session
+                    .insert(user_id, (ws_session_token.clone(), api_session_token_str));
+                if let Some(conn) = self.connections.get_mut(&ws_session_token) {
+                    conn.user_id = Some(user_id);
+                }
+            }
+
+            // Task 3.2: token-guarded unbind to prevent old connection from clearing new mapping
+            UnbindUser { user_id, api_session_token_str } => {
+                let should_remove = self
+                    .user_to_session
+                    .get(&user_id)
+                    .map(|(_, stored_token)| stored_token == &api_session_token_str)
+                    .unwrap_or(false);
+                if should_remove {
+                    self.user_to_session.remove(&user_id);
+                }
             }
         }
         Ok(())

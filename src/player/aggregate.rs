@@ -65,6 +65,8 @@ pub struct PlayerAggregate {
     pub quests: Vec<PlayerQuestProgress>,
     pub achievements: Vec<PlayerAchievementProgress>,
     pub stats: PlayerStats,
+    /// Task 5.7: mode_id → last completed level id (0 = none completed)
+    pub mode_progress: BTreeMap<i32, i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +150,7 @@ mod tests {
             quests: Vec::new(),
             achievements: Vec::new(),
             stats: PlayerStats::default(),
+            mode_progress: BTreeMap::new(),
         }
     }
 

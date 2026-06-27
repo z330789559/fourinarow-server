@@ -160,11 +160,12 @@ impl UserCollection {
         self.get_by_id(&user_id, true, friendships).await
     }
 
+    /// Returns `(token, user_id_string)` on success.
     pub async fn create_session_token(
         &self,
         auth: UserAuth,
         friendships: &FriendshipCollection,
-    ) -> Option<SessionToken> {
+    ) -> Option<(SessionToken, String)> {
         self.get_auth(&auth, friendships).await?;
         let uid: (String,) = sqlx::query_as(
             "SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND deleted_at IS NULL",
@@ -182,7 +183,7 @@ impl UserCollection {
             .await
             .ok()?;
 
-        Some(session_token)
+        Some((session_token, uid.0))
     }
 
     pub async fn remove_session_token(&self, session_token: SessionToken) -> Result<(), ()> {

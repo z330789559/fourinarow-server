@@ -1,8 +1,12 @@
 pub mod chat;
 mod feedback;
+pub mod gameplay;
+pub mod inbox;
 pub mod inventory;
 pub mod invites;
 pub mod leaderboard;
+pub mod minigame_config;
+pub mod notifications;
 pub mod platform;
 pub mod quests;
 pub mod users;
@@ -26,7 +30,11 @@ pub fn config(cfg: &mut web::ServiceConfig) {
     .service(web::scope("/leaderboard").configure(leaderboard::config))
     .service(web::scope("/invites").configure(invites::config))
     .service(web::scope("/inventory").configure(inventory::config))
-    .service(web::scope("/quests").configure(quests::config));
+    .service(web::scope("/quests").configure(quests::config))
+    .service(web::scope("/game").configure(gameplay::config))
+    .service(web::scope("/notifications").configure(notifications::config))
+    .service(web::scope("/inbox").configure(inbox::config))
+    .service(web::scope("/minigame-config").configure(minigame_config::config));
 }
 
 #[derive(Serialize)]

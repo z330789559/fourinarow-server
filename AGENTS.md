@@ -18,20 +18,30 @@
 
 ---
 
+## 1.1 专用 Agent 配置
+
+- 服务端开发专用 agent 文档：`agents/game-server-developer.md`。
+- 当任务涉及服务端功能设计、实现、排查、重构、OpenSpec change 执行或通用小游戏能力演进时，必须先读取该文档。
+- `agents/game-server-developer.md` 的定位是：本项目是 Rust 版**通用小游戏后端服务**，当前代码基底来自 `fourinarow-server`，不得把项目目标描述成“四子棋实时对战服务”。
+- 若 `agents/game-server-developer.md` 与本文件冲突，仍以本文件为准；若本文件未覆盖的服务端执行细节，以该 agent 文档为补充规范。
+
+---
+
 ## 2. 项目画像
 
 | 维度 | 实际值 |
 |------|--------|
-| 语言 | Rust 2021 edition，crate `fourinarow-server` v1.4.0 |
+| 定位 | Rust 版通用小游戏后端服务，当前代码基底来自 `fourinarow-server` |
+| 语言 | Rust 2021 edition，当前 crate 名称 `fourinarow-server` v1.4.0 |
 | Web/Actor | Actix-web 4 + actix-web-actors 4 + actix 0.13 + tokio 1 |
 | 数据库 | PostgreSQL 16，sqlx 0.7（`postgres` + `macros` + `migrate` + `chrono`，编译期校验） |
-| 实时通信 | WebSocket 实时对战 + 自研可靠传输层（消息送达保证、重排序、自动重连） |
-| 模块 | `src/api`（REST）`src/game`（WS actor 对战）`src/database`（sqlx）`src/items` `src/quests` `src/logging` |
+| 实时通信 | WebSocket 实时通信 / 状态同步 + 自研可靠传输层（消息送达保证、重排序、自动重连） |
+| 模块 | `src/api`（REST）`src/game`（WS actor / room / 状态同步演进）`src/database`（sqlx）`src/items` `src/quests` `src/logging` `src/player` |
 | 迁移 | `migrations/001..004_*.sql`，启动时 `sqlx::migrate!` 自动执行 |
 | 测试 | 无单元测试框架；仅 `load_test.html` 手动压测 |
-| 现有文档 | `README.md` `docs/prod.md` `docs/implement_sum.md` `cross_compile.md` |
+| 现有文档 | `README.md` `docs/prod.md` `docs/implement_sum.md` `cross_compile.md` `agents/game-server-developer.md` |
 
-**业务**：四子棋（Connect Four）在线实时对战，支持账号系统、好友、邀请码、道具/背包/商店、任务、SR 天梯，平台接入微信 / 抖音小游戏。
+**业务目标**：沉淀通用小游戏后端能力，当前已包含账号系统、好友、邀请码、道具/背包/商店、任务、排行榜、SR/积分、可靠 WebSocket 通信和玩家聚合缓存；后续会扩展状态同步、AI/AIO、状态机、瓦片地图初始化与管理、技能机制、技能设计、公会等能力，平台接入微信 / 抖音小游戏。
 
 ---
 
@@ -102,6 +112,7 @@
 ## 8. 文档规则
 
 - 正式文档统一写入 `docs/`，Markdown + 中文。
+- 专用 agent 文档统一写入 `agents/`，当前入口为 `agents/game-server-developer.md`。
 - 注意：本项目 `.gitignore` 当前忽略了 `docs/`（不入库）；如需文档入库，先与用户确认是否调整忽略规则。
 - 临时分析/计划也放 `docs/`，除非用户另有指定。
 

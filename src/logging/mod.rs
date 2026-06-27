@@ -1,6 +1,8 @@
+mod activity;
 mod game_logging;
 mod lobby_logging;
 
+pub use self::activity::{ActivityEvent, ActivityEventKind, ActivityLogHandle};
 pub use self::game_logging::*;
 pub use self::lobby_logging::*;
 

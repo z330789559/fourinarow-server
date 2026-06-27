@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     api::{get_session_token, ApiResponse},
-    database::DatabaseManager,
+    database::{notifications::{set_badge, MODULE_QUESTS}, DatabaseManager},
     player::RedeemError,
+    quests::GameEvent,
 };
 
 pub fn config(cfg: &mut web::ServiceConfig) {
@@ -57,7 +58,15 @@ async fn create_invite(
 
     let max_uses = payload.max_uses.unwrap_or(1).clamp(1, 100);
     match db.invites.create(&user.id, max_uses).await {
-        Some(invite) => HttpResponse::Ok().json(invite),
+        Some(invite) => {
+            let prefix = format!("invite_created:{}", invite.code);
+            if let Ok(completed_quests) = db.players.trigger_quest_event(&user.id, GameEvent::InviteCreated, &prefix).await {
+                if !completed_quests.is_empty() {
+                    set_badge(&db.pool, &user.id, MODULE_QUESTS).await;
+                }
+            }
+            HttpResponse::Ok().json(invite)
+        }
         None => {
             HttpResponse::InternalServerError().json(ApiResponse::new("Failed to create invite"))
         }

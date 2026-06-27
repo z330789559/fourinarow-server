@@ -1,23 +1,38 @@
 use crate::api::{chat::ChatThreadId, users::user::*, ApiError};
-use crate::database::DatabaseManager;
+use crate::config::GameConfig;
+use crate::database::{notifications::{set_badge, MODULE_INBOX, MODULE_QUESTS}, DatabaseManager};
 use crate::game::client_adapter::ClientAdapterMsg;
+use crate::game::connection_mgr::{ConnectionManager, PushToUser};
 use crate::game::lobby_mgr::{self, LobbyManager};
 use crate::game::msg::*;
+use crate::logging::{ActivityEvent, ActivityEventKind, ActivityLogHandle};
 
 use actix::prelude::*;
 use serde::Deserialize;
 use std::sync::Arc;
+use serde_json;
 
 const SR_PER_WIN: i32 = 25;
 
 pub struct UserManager {
     db: Arc<DatabaseManager>,
+    activity_log: ActivityLogHandle,
+    connection_mgr: Addr<ConnectionManager>,
+    game_config: Arc<GameConfig>,
     lobby_mgr_state: BacklinkState,
 }
 impl UserManager {
-    pub fn new(db: Arc<DatabaseManager>) -> UserManager {
+    pub fn new(
+        db: Arc<DatabaseManager>,
+        activity_log: ActivityLogHandle,
+        connection_mgr: Addr<ConnectionManager>,
+        game_config: Arc<GameConfig>,
+    ) -> UserManager {
         UserManager {
             db,
+            activity_log,
+            connection_mgr,
+            game_config,
             lobby_mgr_state: BacklinkState::Waiting,
         }
     }
@@ -61,6 +76,8 @@ pub mod msg {
         fn handle(&mut self, msg: Register, _ctx: &mut Self::Context) -> Self::Result {
             let auth = msg.0;
             let db = self.db.clone();
+            let activity_log = self.activity_log.clone();
+            let game_config = self.game_config.clone();
 
             Box::pin(
                 async move {
@@ -80,17 +97,37 @@ pub mod msg {
                         while db.users.get_id(&user.id, &db.friendships).await.is_some() {
                             user.gen_new_id();
                         }
+                        let new_user_id = user.id;
+                        let user_id_str = new_user_id.to_string();
                         db.users.insert(user.clone()).await;
-                        db.users
+                        let result = db.users
                             .create_session_token(auth, &db.friendships)
                             .await
-                            .ok_or(ApiError::IncorrectCredentials)
+                            .map(|(token, _)| token)
+                            .ok_or(ApiError::IncorrectCredentials);
+                        if result.is_ok() {
+                            // Task 5.3: initialize mode progress for new user; failure tolerated
+                            if let Err(e) = db.players
+                                .ensure_mode_progress(&new_user_id, &game_config)
+                                .await
+                            {
+                                log::warn!(
+                                    "init mode progress failed for {}: {:?}",
+                                    new_user_id,
+                                    e
+                                );
+                            }
+                            activity_log.record(ActivityEvent::new(
+                                Some(user_id_str),
+                                ActivityEventKind::Register,
+                                None,
+                            ));
+                        }
+                        result
                     }
                 }
                 .into_actor(self),
             )
-            //.map(|res, _, _| res)
-            //.boxed_local(ctx)
         }
     }
     pub struct Login(pub UserAuth);
@@ -102,12 +139,20 @@ pub mod msg {
 
         fn handle(&mut self, msg: Login, _ctx: &mut Self::Context) -> Self::Result {
             let db = self.db.clone();
+            let activity_log = self.activity_log.clone();
             Box::pin(
                 async move {
-                    db.users
+                    let pair = db.users
                         .create_session_token(msg.0, &db.friendships)
-                        .await
-                        .ok_or(ApiError::IncorrectCredentials)
+                        .await;
+                    if let Some((_, ref user_id)) = pair {
+                        activity_log.record(ActivityEvent::new(
+                            Some(user_id.clone()),
+                            ActivityEventKind::Login,
+                            None,
+                        ));
+                    }
+                    pair.map(|(token, _)| token).ok_or(ApiError::IncorrectCredentials)
                 }
                 .into_actor(self),
             )
@@ -123,9 +168,10 @@ pub mod msg {
 
         fn handle(&mut self, msg: Logout, _ctx: &mut Self::Context) -> Self::Result {
             let db = self.db.clone();
+            let activity_log = self.activity_log.clone();
             Box::pin(
                 async move {
-                    if let Some(user) = db
+                    let user_id_str = if let Some(user) = db
                         .users
                         .get_session_token(msg.0.clone(), &db.friendships)
                         .await
@@ -138,11 +184,22 @@ pub mod msg {
                             );
                             return Err(ApiError::InternalServerError);
                         }
-                    }
-                    db.users
+                        Some(user.id.to_string())
+                    } else {
+                        None
+                    };
+                    let result = db.users
                         .remove_session_token(msg.0)
                         .await
-                        .map_err(|_| ApiError::InternalServerError)
+                        .map_err(|_| ApiError::InternalServerError);
+                    if result.is_ok() {
+                        activity_log.record(ActivityEvent::new(
+                            user_id_str,
+                            ActivityEventKind::Logout,
+                            None,
+                        ));
+                    }
+                    result
                 }
                 .into_actor(self),
             )
@@ -227,6 +284,7 @@ pub mod msg {
         type Result = ResponseActFuture<Self, ()>;
         fn handle(&mut self, msg: IntUserMgrMsg, _ctx: &mut Self::Context) -> Self::Result {
             let db = self.db.clone();
+            let connection_mgr = self.connection_mgr.clone();
             Box::pin(
                 async move {
                     use GameMsg::*;
@@ -247,14 +305,74 @@ pub mod msg {
                                     .await;
                                 db.users.invalidate_cache(&winner_id);
                                 db.users.invalidate_cache(&loser_id);
-                                if let Err(error) = settle_result {
-                                    log::error!(
-                                        "failed to settle game settlement_id={} winner={} loser={}: {:?}",
-                                        settlement_id,
-                                        winner_id,
-                                        loser_id,
-                                        error
-                                    );
+                                match settle_result {
+                                    Ok(outcome) => {
+                                        // Push achievement unlocks to winner
+                                        for (achievement_id, tier) in &outcome.winner_achievements {
+                                            connection_mgr.do_send(PushToUser {
+                                                user_id: winner_id,
+                                                msg: GameMsgOut::AchievementUnlocked {
+                                                    achievement_id: achievement_id.clone(),
+                                                    tier: *tier,
+                                                },
+                                            });
+                                        }
+                                        // Push quest completions (task 6.3)
+                                        if !outcome.winner_completed_quests.is_empty() {
+                                            set_badge(&db.pool, &winner_id, MODULE_QUESTS).await;
+                                            for (quest_id, quest_type) in &outcome.winner_completed_quests {
+                                                connection_mgr.do_send(PushToUser {
+                                                    user_id: winner_id,
+                                                    msg: GameMsgOut::QuestCompleted {
+                                                        quest_id: quest_id.clone(),
+                                                        quest_type: quest_type.clone(),
+                                                    },
+                                                });
+                                            }
+                                        }
+                                        if !outcome.loser_completed_quests.is_empty() {
+                                            set_badge(&db.pool, &loser_id, MODULE_QUESTS).await;
+                                            for (quest_id, quest_type) in &outcome.loser_completed_quests {
+                                                connection_mgr.do_send(PushToUser {
+                                                    user_id: loser_id,
+                                                    msg: GameMsgOut::QuestCompleted {
+                                                        quest_id: quest_id.clone(),
+                                                        quest_type: quest_type.clone(),
+                                                    },
+                                                });
+                                            }
+                                        }
+                                        // Task 4.4: push leaderboard update to top-20 online players
+                                        let top = db.leaderboard.get_top_by_rating(20, 0).await;
+                                        let lb_entries: Vec<LeaderboardEntry> = top
+                                            .iter()
+                                            .map(|e| LeaderboardEntry {
+                                                user_id: e.user_id.clone(),
+                                                username: e.username.clone(),
+                                                rank: e.rank as i32,
+                                                score: e.skill_rating,
+                                            })
+                                            .collect();
+                                        for entry in &top {
+                                            if let Ok(uid) = UserId::from_str(&entry.user_id) {
+                                                connection_mgr.do_send(PushToUser {
+                                                    user_id: uid,
+                                                    msg: GameMsgOut::LeaderboardUpdate {
+                                                        top: lb_entries.clone(),
+                                                    },
+                                                });
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        log::error!(
+                                            "failed to settle game settlement_id={} winner={} loser={}: {:?}",
+                                            settlement_id,
+                                            winner_id,
+                                            loser_id,
+                                            error
+                                        );
+                                    }
                                 }
                             }
                         },
@@ -365,6 +483,7 @@ pub mod msg {
         type Result = ResponseActFuture<Self, bool>;
         fn handle(&mut self, msg: UserAction, _ctx: &mut Self::Context) -> Self::Result {
             let db = self.db.clone();
+            let activity_log = self.activity_log.clone();
             Box::pin(
                 async move {
                     if let Some(user_me) = db
@@ -410,6 +529,11 @@ pub mod msg {
                                             if updated {
                                                 db.users.invalidate_cache(&user_me.id);
                                                 db.users.invalidate_cache(&other_id);
+                                                activity_log.record(ActivityEvent::new(
+                                                    Some(user_me.id.to_string()),
+                                                    ActivityEventKind::AddFriend,
+                                                    Some(serde_json::json!({ "other_id": other_id.to_string() })),
+                                                ));
                                             }
                                             updated
                                         } else {
@@ -490,5 +614,242 @@ pub mod msg {
                 .into_actor(self),
             )
         }
+    }
+
+    // ── Task 5.4: StartGame ────────────────────────────────────────────────
+
+    pub struct GetStartGameData {
+        pub user_id: UserId,
+    }
+    impl Message for GetStartGameData {
+        type Result = Result<GameMsgOut, ()>;
+    }
+    impl Handler<GetStartGameData> for UserManager {
+        type Result = ResponseActFuture<Self, Result<GameMsgOut, ()>>;
+        fn handle(&mut self, msg: GetStartGameData, _ctx: &mut Self::Context) -> Self::Result {
+            let db = self.db.clone();
+            let game_config = self.game_config.clone();
+            Box::pin(
+                async move {
+                    // Task 5.8: lazy backfill
+                    if let Err(e) = db.players.ensure_mode_progress(&msg.user_id, &game_config).await {
+                        log::warn!("ensure_mode_progress failed for {}: {:?}", msg.user_id, e);
+                    }
+                    let agg = match db.players.get_readonly(&msg.user_id).await {
+                        Ok(a) => a,
+                        Err(_) => return Err(()),
+                    };
+                    let journey_progress = agg.mode_progress.get(&1).copied().unwrap_or(0);
+
+                    let modes: Vec<ModeStatus> = game_config
+                        .modes
+                        .iter()
+                        .map(|m| {
+                            let current_level =
+                                agg.mode_progress.get(&m.mode).copied().unwrap_or(0);
+                            let total = game_config
+                                .level_count_by_mode
+                                .get(&m.mode)
+                                .copied()
+                                .unwrap_or(0);
+                            // unlock_by_journey_level <= 1 means always available (starter modes);
+                            // otherwise require journey_progress >= threshold
+                            let unlocked = m.unlock_by_journey_level <= 1
+                                || journey_progress >= m.unlock_by_journey_level;
+                            ModeStatus {
+                                mode: m.mode,
+                                unlocked,
+                                current_level,
+                                total_levels: total as i32,
+                            }
+                        })
+                        .collect();
+
+                    // For each unlocked mode, the current next-level entry
+                    let levels: Vec<LevelEntry> = modes
+                        .iter()
+                        .filter(|m| m.unlocked)
+                        .filter_map(|m| {
+                            game_config
+                                .level_by_id(m.mode, m.current_level + 1)
+                                .map(|l| level_entry_from_config(l, 0))
+                        })
+                        .collect();
+
+                    Ok(GameMsgOut::StartGameResp { modes, levels })
+                }
+                .into_actor(self),
+            )
+        }
+    }
+
+    // ── Task 5.5: LevelPage ────────────────────────────────────────────────
+
+    pub struct GetLevelPage {
+        pub user_id: UserId,
+        pub mode: i32,
+        pub after_id: i32,
+        pub page_size: usize,
+    }
+    impl Message for GetLevelPage {
+        type Result = Result<GameMsgOut, ()>;
+    }
+    impl Handler<GetLevelPage> for UserManager {
+        type Result = ResponseActFuture<Self, Result<GameMsgOut, ()>>;
+        fn handle(&mut self, msg: GetLevelPage, _ctx: &mut Self::Context) -> Self::Result {
+            let game_config = self.game_config.clone();
+            Box::pin(
+                async move {
+                    let all_levels = game_config.levels_in_mode(msg.mode);
+                    let start = all_levels.partition_point(|l| l.id <= msg.after_id);
+                    let remaining = &all_levels[start..];
+                    let has_more = remaining.len() > msg.page_size;
+                    let levels: Vec<LevelEntry> = remaining
+                        .iter()
+                        .take(msg.page_size)
+                        .map(|l| level_entry_from_config(l, 0))
+                        .collect();
+                    Ok(GameMsgOut::LevelPageResp { levels, has_more })
+                }
+                .into_actor(self),
+            )
+        }
+    }
+
+    // ── Task 5.6: CompleteLevel ────────────────────────────────────────────
+
+    pub struct SubmitCompleteLevel {
+        pub user_id: UserId,
+        pub mode: i32,
+        pub level_id: i32,
+        pub stars: i32,
+    }
+    impl Message for SubmitCompleteLevel {
+        type Result = Result<GameMsgOut, ()>;
+    }
+    impl Handler<SubmitCompleteLevel> for UserManager {
+        type Result = ResponseActFuture<Self, Result<GameMsgOut, ()>>;
+        fn handle(&mut self, msg: SubmitCompleteLevel, _ctx: &mut Self::Context) -> Self::Result {
+            let db = self.db.clone();
+            let game_config = self.game_config.clone();
+            let activity_log = self.activity_log.clone();
+            let connection_mgr = self.connection_mgr.clone();
+            Box::pin(
+                async move {
+                    // P1.3: validate (mode, level_id) exists in config before any DB work
+                    if game_config.level_by_id(msg.mode, msg.level_id).is_none() {
+                        return Ok(GameMsgOut::CompleteLevelResp { ok: false, new_level: 0, rewards: vec![] });
+                    }
+
+                    // Task 5.8: lazy backfill before access
+                    if let Err(e) = db.players.ensure_mode_progress(&msg.user_id, &game_config).await {
+                        log::warn!("ensure_mode_progress failed for {}: {:?}", msg.user_id, e);
+                    }
+
+                    // Mode unlock check (business layer, before DB transaction)
+                    let agg = match db.players.get_readonly(&msg.user_id).await {
+                        Ok(a) => a,
+                        Err(_) => return Ok(GameMsgOut::CompleteLevelResp { ok: false, new_level: 0, rewards: vec![] }),
+                    };
+                    let journey_progress = agg.mode_progress.get(&1).copied().unwrap_or(0);
+                    if let Some(mode_cfg) = game_config.mode_config(msg.mode) {
+                        // unlock_by_journey_level <= 1 = always available; else need journey_progress >= threshold
+                        if mode_cfg.unlock_by_journey_level > 1
+                            && journey_progress < mode_cfg.unlock_by_journey_level
+                        {
+                            return Ok(GameMsgOut::CompleteLevelResp { ok: false, new_level: 0, rewards: vec![] });
+                        }
+                    } else {
+                        return Ok(GameMsgOut::CompleteLevelResp { ok: false, new_level: 0, rewards: vec![] });
+                    }
+
+                    match db.players.complete_level(&msg.user_id, msg.mode, msg.level_id, msg.stars).await {
+                        Ok(outcome) => {
+                            activity_log.record(ActivityEvent::new(
+                                Some(msg.user_id.to_string()),
+                                ActivityEventKind::CompleteLevel,
+                                Some(serde_json::json!({
+                                    "mode": msg.mode,
+                                    "level_id": msg.level_id,
+                                    "stars": msg.stars
+                                })),
+                            ));
+                            // Push achievement unlocks
+                            for (achievement_id, tier) in &outcome.achievements {
+                                connection_mgr.do_send(PushToUser {
+                                    user_id: msg.user_id,
+                                    msg: GameMsgOut::AchievementUnlocked {
+                                        achievement_id: achievement_id.clone(),
+                                        tier: *tier,
+                                    },
+                                });
+                            }
+                            // Progressive milestones → inbox badge + WS push
+                            if !outcome.milestones.is_empty() {
+                                set_badge(&db.pool, &msg.user_id, MODULE_INBOX).await;
+                                for (achievement_id, step, inbox_id) in &outcome.milestones {
+                                    connection_mgr.do_send(PushToUser {
+                                        user_id: msg.user_id,
+                                        msg: GameMsgOut::ProgressiveMilestone {
+                                            achievement_id: achievement_id.clone(),
+                                            step: *step,
+                                        },
+                                    });
+                                    connection_mgr.do_send(PushToUser {
+                                        user_id: msg.user_id,
+                                        msg: GameMsgOut::NewInboxMessage {
+                                            id: *inbox_id,
+                                            msg_type: "progressive_achievement".to_string(),
+                                            has_reward: true,
+                                        },
+                                    });
+                                }
+                            }
+                            // Quest completions → quests badge + WS push
+                            if !outcome.completed_quests.is_empty() {
+                                set_badge(&db.pool, &msg.user_id, MODULE_QUESTS).await;
+                                for (quest_id, quest_type) in &outcome.completed_quests {
+                                    connection_mgr.do_send(PushToUser {
+                                        user_id: msg.user_id,
+                                        msg: GameMsgOut::QuestCompleted {
+                                            quest_id: quest_id.clone(),
+                                            quest_type: quest_type.clone(),
+                                        },
+                                    });
+                                }
+                            }
+                            let rewards = outcome.rewards.iter()
+                                .map(|(item_id, amount)| RewardEntry { item_id: item_id.clone(), amount: *amount })
+                                .collect();
+                            Ok(GameMsgOut::CompleteLevelResp { ok: true, new_level: outcome.new_level, rewards })
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "complete_level rejected user={} mode={} level_id={}: {:?}",
+                                msg.user_id, msg.mode, msg.level_id, e
+                            );
+                            Ok(GameMsgOut::CompleteLevelResp { ok: false, new_level: 0, rewards: vec![] })
+                        }
+                    }
+                }
+                .into_actor(self),
+            )
+        }
+    }
+}
+
+fn level_entry_from_config(l: &crate::config::LevelConfig, best_stars: i32) -> LevelEntry {
+    LevelEntry {
+        id: l.id,
+        mode: l.mode,
+        best_stars,
+        level_min: l.level_min,
+        level_max: l.level_max,
+        chapter: l.chapter,
+        ammo_count: l.ammo_count,
+        triple_star: l.triple_star,
+        double_star: l.double_star,
+        single_star: l.single_star,
+        scene_id: l.scene_id,
     }
 }
