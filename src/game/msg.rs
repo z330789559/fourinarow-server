@@ -5,6 +5,70 @@ use super::{
 };
 use crate::api::users::{session_token::SessionToken, user::UserId};
 use actix::prelude::*;
+use serde::{Deserialize, Serialize};
+
+// ── Game JSON sub-protocol types (Task 5.1) ──────────────────────────────────
+
+/// Uplink: client → server, prefixed with `G:` in the reliable layer
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GameMsgIn {
+    StartGame,
+    LevelPage { mode: i32, after_id: i32, page_size: usize },
+    CompleteLevel { mode: i32, level_id: i32, stars: i32 },
+}
+
+/// Downlink: server → client, prefixed with `GP:` in the reliable layer
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GameMsgOut {
+    FriendOnline { user_id: String },
+    AchievementUnlocked { achievement_id: String, tier: i32 },
+    LeaderboardUpdate { top: Vec<LeaderboardEntry> },
+    StartGameResp { modes: Vec<ModeStatus>, levels: Vec<LevelEntry> },
+    LevelPageResp { levels: Vec<LevelEntry>, has_more: bool },
+    CompleteLevelResp { ok: bool, new_level: i32, rewards: Vec<RewardEntry> },
+    QuestCompleted { quest_id: String, quest_type: String },
+    ProgressiveMilestone { achievement_id: String, step: i32 },
+    NewInboxMessage { id: i64, msg_type: String, has_reward: bool },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaderboardEntry {
+    pub user_id: String,
+    pub username: String,
+    pub rank: i32,
+    pub score: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModeStatus {
+    pub mode: i32,
+    pub unlocked: bool,
+    pub current_level: i32,
+    pub total_levels: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LevelEntry {
+    pub id: i32,
+    pub mode: i32,
+    pub best_stars: i32, // 0 = not yet completed; per-level star history not stored
+    pub level_min: i32,
+    pub level_max: i32,
+    pub chapter: i32,
+    pub ammo_count: i32,
+    pub triple_star: i32,
+    pub double_star: i32,
+    pub single_star: i32,
+    pub scene_id: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RewardEntry {
+    pub item_id: String,
+    pub amount: i32,
+}
 
 #[derive(Debug, Clone)]
 pub enum ReliablePacketIn {
@@ -13,20 +77,17 @@ pub enum ReliablePacketIn {
 }
 
 impl ReliablePacketIn {
+    /// Parse a reliable packet from the client.
+    /// Uses `splitn(3, "::")` so MSG content (e.g. JSON with "::") is preserved intact.
     pub fn parse(orig: &str) -> Result<ReliablePacketIn, ReliabilityError> {
-        let uppercase: String = if let Some(u) = orig.split("::").next() {
-            u.into()
-        } else {
-            return Err(ReliabilityError::InvalidFormat);
-        };
-        let parts: Vec<_> = orig.split("::").collect();
-        return if parts.len() == 2 && uppercase == "ACK" {
+        let parts: Vec<_> = orig.splitn(3, "::").collect();
+        return if parts.len() == 2 && parts[0] == "ACK" {
             if let Ok(id) = parts[1].parse::<usize>() {
                 Ok(ReliablePacketIn::Ack(id))
             } else {
                 Err(ReliabilityError::InvalidFormat)
             }
-        } else if parts.len() == 3 && uppercase == "MSG" {
+        } else if parts.len() == 3 && parts[0] == "MSG" {
             if let Ok(id) = parts[1].parse::<usize>() {
                 if let Some(player_msg) = PlayerMessage::parse(parts[2]) {
                     Ok(ReliablePacketIn::Msg(id, player_msg))
@@ -78,7 +139,7 @@ pub enum ReliabilityError {
     InvalidFormat,  // ReliableMessage could not be parsed
     UnknownMessage, // Correct format but unknown keyword (ack, syn, msg)
     #[allow(dead_code)]
-    KillClient,     // Sent in case client is fucking up bad. Kills it immediately.
+    KillClient, // Sent in case client is fucking up bad. Kills it immediately.
 }
 impl ReliabilityError {
     pub fn serialize(self) -> String {
@@ -160,15 +221,19 @@ pub enum ServerMessage {
     GameOver(bool), // true if recipient won
     LobbyClosing,
     ReadyForGamePing,
-    LoginResponse { success: bool },
+    LoginResponse {
+        success: bool,
+    },
     Error(Option<SrvMsgError>),
     BattleReq(UserId, GameId),
     CurrentServerState(usize, bool), // connected players, someone wants to play
     ChatMessage(bool, String, Option<String>), // is_global, message, sender_name
     ChatRead(bool),                  // is_global
-    
+
     /// Sent when another client logs into an account which is authenticated on this connection -> this one is closed
     CloseOtherClientLogin,
+    /// Game JSON sub-protocol push/response (Task 5.1); serialized as `GP:{json}`
+    GameProtocol(GameMsgOut),
 }
 
 impl ServerMessage {
@@ -216,6 +281,10 @@ impl ServerMessage {
             }
             ChatRead(is_global) => format!("CHAT_READ:{}", is_global),
             CloseOtherClientLogin => "CLOSE_OTHER_CLIENT_LOGIN".to_owned(),
+            GameProtocol(msg) => format!(
+                "GP:{}",
+                serde_json::to_string(&msg).unwrap_or_else(|_| "{}".to_string())
+            ),
         }
     }
 }
@@ -270,10 +339,19 @@ pub enum PlayerMessage {
     BattleReq(UserId),
     ChatMessage(String),
     ChatRead,
+    /// Game JSON sub-protocol uplink (Task 5.1); parsed from `G:{json}`
+    GameProtocol(GameMsgIn),
 }
 
 impl PlayerMessage {
     pub fn parse(orig: &str) -> Option<PlayerMessage> {
+        // G: prefix check on original string BEFORE to_uppercase() — JSON must not be uppercased
+        if orig.starts_with("G:") {
+            return serde_json::from_str::<GameMsgIn>(&orig[2..])
+                .ok()
+                .map(PlayerMessage::GameProtocol);
+        }
+
         let s = orig.to_uppercase();
         if s.len() > 1000 {
             // chat messages might be long
@@ -334,6 +412,62 @@ impl PlayerMessage {
 
 impl Message for PlayerMessage {
     type Result = Result<(), ()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ① Normal text command: MSG::1::PC:3 → PlaceChip(3)
+    #[test]
+    fn splitn_pc_3() {
+        match ReliablePacketIn::parse("MSG::1::PC:3") {
+            Ok(ReliablePacketIn::Msg(1, PlayerMessage::PlaceChip(3))) => {}
+            other => panic!("expected Msg(1, PlaceChip(3)), got {:?}", other),
+        }
+    }
+
+    /// ② Chat message (base64, contains single colon): MSG::1::CHAT_MSG:<b64>
+    #[test]
+    fn splitn_chat_msg() {
+        let encoded = base64::encode_config("hello", base64::STANDARD);
+        let input = format!("MSG::1::CHAT_MSG:{}", encoded);
+        match ReliablePacketIn::parse(&input) {
+            Ok(ReliablePacketIn::Msg(1, PlayerMessage::ChatMessage(ref s))) if s == "hello" => {}
+            other => panic!("expected ChatMessage(hello), got {:?}", other),
+        }
+    }
+
+    /// ③ JSON game message: MSG::1::G:{"kind":"start_game"}
+    #[test]
+    fn splitn_json_start_game() {
+        match ReliablePacketIn::parse(r#"MSG::1::G:{"kind":"start_game"}"#) {
+            Ok(ReliablePacketIn::Msg(1, PlayerMessage::GameProtocol(GameMsgIn::StartGame))) => {}
+            other => panic!("expected GameProtocol(StartGame), got {:?}", other),
+        }
+    }
+
+    /// ④ JSON content that itself contains "::": splitn must preserve it intact
+    #[test]
+    fn splitn_json_content_double_colon_preserved() {
+        let input = r#"MSG::1::G:{"kind":"level_page","mode":1,"after_id":0,"page_size":10}"#;
+        // verify parts are split correctly at the first two "::" only
+        let parts: Vec<_> = input.splitn(3, "::").collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "MSG");
+        assert_eq!(parts[1], "1");
+        assert!(parts[2].starts_with("G:"));
+
+        // also verify a string with :: inside the JSON body isn't mangled
+        let with_colons = r#"MSG::2::G:{"kind":"start_game"}"#;
+        // replace "start_game" with a fake value containing :: to test the guarantee
+        let raw = r#"MSG::2::G:{"data":"a::b","kind":"start_game"}"#;
+        let raw_parts: Vec<_> = raw.splitn(3, "::").collect();
+        assert_eq!(raw_parts[2], r#"G:{"data":"a::b","kind":"start_game"}"#,
+            ":: inside JSON content must be preserved by splitn(3)");
+        // suppress unused variable warning for `with_colons`
+        let _ = with_colons;
+    }
 }
 // impl Message for ServerMessageNamed {
 //     type Result = Result<(), ()>; // whether action was successful or not

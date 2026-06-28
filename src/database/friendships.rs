@@ -30,11 +30,7 @@ impl DbFriendship {
 
         let state = if self.status == "friends" {
             BackendFriendshipState::Friends {
-                chat_thread_id: self
-                    .chat_thread_id
-                    .unwrap_or_default()
-                    .as_str()
-                    .into(),
+                chat_thread_id: self.chat_thread_id.unwrap_or_default().as_str().into(),
             }
         } else if self.requester_id == viewer_str {
             BackendFriendshipState::ReqOutgoing
@@ -117,14 +113,11 @@ impl FriendshipCollection {
 
     pub async fn remove(&self, from_id: UserId, to_id: UserId) -> bool {
         let (id1, id2) = normalize(&from_id, &to_id);
-        sqlx::query(
-            "DELETE FROM friendships WHERE user_id_1 = $1 AND user_id_2 = $2",
-        )
-        .bind(&id1)
-        .bind(&id2)
-        .execute(&self.pool)
-        .await
-        .is_ok()
+        sqlx::query("DELETE FROM friendships WHERE user_id_1 = $1 AND user_id_2 = $2")
+            .bind(&id1)
+            .bind(&id2)
+            .execute(&self.pool)
+            .await
+            .is_ok()
     }
 }
-

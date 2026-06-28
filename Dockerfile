@@ -28,6 +28,7 @@ ENV BIND=0.0.0.0:8080
 
 COPY --from=builder /code/target/release/fourinarow-server /fourinarow-server
 COPY ./static /static
+COPY ./config /config
 COPY .env /.env
 
 CMD [ "/fourinarow-server" ]

@@ -1,19 +1,26 @@
 pub mod chat_msg;
 pub mod friendships;
 pub mod games;
+pub mod inbox;
 pub mod invites;
 pub mod items;
 pub mod leaderboard;
+pub mod minigame_config;
+pub mod minigame_leaderboard;
+pub mod notifications;
 pub mod quests;
 pub mod users;
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
+use crate::player::PlayerRepository;
+
 use self::{
     chat_msg::ChatMsgCollection, friendships::FriendshipCollection, games::GameCollection,
     invites::InviteCollection, items::ItemCollection, leaderboard::LeaderboardCollection,
-    quests::QuestCollection, users::UserCollection,
+    minigame_leaderboard::MinigameLeaderboardCollection, quests::QuestCollection,
+    users::UserCollection,
 };
 
 const DATABASE_URL_DEFAULT: &str = "******localhost:5432/fourinarow";
@@ -27,7 +34,9 @@ pub struct DatabaseManager {
     pub items: ItemCollection,
     pub invites: InviteCollection,
     pub leaderboard: LeaderboardCollection,
+    pub minigame_leaderboard: MinigameLeaderboardCollection,
     pub quests: QuestCollection,
+    pub players: PlayerRepository,
 }
 
 impl DatabaseManager {
@@ -47,6 +56,9 @@ impl DatabaseManager {
             .await
             .expect("Failed to run database migrations");
 
+        let players = PlayerRepository::new(pool.clone());
+        players.start_flush_worker();
+
         DatabaseManager {
             users: UserCollection::new(pool.clone()),
             games: GameCollection::new(pool.clone()),
@@ -55,7 +67,9 @@ impl DatabaseManager {
             items: ItemCollection::new(pool.clone()),
             invites: InviteCollection::new(pool.clone()),
             leaderboard: LeaderboardCollection::new(pool.clone()),
+            minigame_leaderboard: MinigameLeaderboardCollection::new(pool.clone()),
             quests: QuestCollection::new(pool.clone()),
+            players,
             pool,
         }
     }

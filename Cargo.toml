@@ -29,6 +29,7 @@ env_logger = "0.10"
 log = "0.4"
 rand = "0.8"
 sha3 = "0.10"
+sha2 = "0.10"  # minigame-config 版本内容 checksum（sha256，ETag/完整性，与种子一致）
 dashmap = "5"
 lettre = "0.10.0-beta.2"
 dotenv = "0.15.0"

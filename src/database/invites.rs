@@ -87,11 +87,7 @@ impl InviteCollection {
         )
     }
 
-    pub async fn redeem(
-        &self,
-        code: &str,
-        user_id: &UserId,
-    ) -> Result<Option<(String, i32)>, String> {
+    async fn redeem(&self, code: &str, user_id: &UserId) -> Result<Option<(String, i32)>, String> {
         let invite = self
             .get(code)
             .await

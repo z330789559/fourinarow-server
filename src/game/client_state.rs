@@ -2,13 +2,13 @@ use super::lobby_mgr::{self, *};
 use super::msg::*;
 use super::{
     client_adapter::{ClientAdapter, ClientAdapterMsg},
-    connection_mgr::ConnectionManager,
+    connection_mgr::{ConnectionManager, PushToUser},
 };
 use super::{connection_mgr::ConnectionManagerMsg, game_info::*};
 use super::{connection_mgr::WSSessionToken, lobby::*};
 use crate::{
     api::users::{
-        user::PublicUserMe,
+        user::{PublicFriendState, PublicUserMe},
         user_mgr::{self, UserManager},
     },
     logging::*,
@@ -26,6 +26,8 @@ pub struct ClientState {
     backlinked_state: BacklinkState,
     lobby_state: ClientLobbyState,
     maybe_user_info: Option<PublicUserMe>,
+    /// API session token string stored for token-guarded UnbindUser on stopping (Task 3.2)
+    maybe_api_token_str: Option<String>,
 }
 
 #[derive(Clone)]
@@ -52,6 +54,7 @@ impl ClientState {
             backlinked_state: BacklinkState::Waiting,
             lobby_state: ClientLobbyState::Idle,
             maybe_user_info: None,
+            maybe_api_token_str: None,
         }
     }
 
@@ -301,6 +304,9 @@ impl Handler<PlayerMessage> for ClientState {
                                 ctx.address(),
                             ));
                     }
+                    let api_token_str = session_token.to_string();
+                    let ws_token = self.id.clone();
+                    let conn_mgr = self.connection_mgr.clone();
                     self.user_mgr
                         .send(user_mgr::msg::StartPlaying {
                             session_token,
@@ -311,25 +317,41 @@ impl Handler<PlayerMessage> for ClientState {
                             if let Ok(maybe_id) = res {
                                 match maybe_id {
                                     Ok(user) => {
-                                        // println!("Start playing! user: {:?}", user);
-                                        act.maybe_user_info = Some(user);
+                                        act.maybe_user_info = Some(user.clone());
+                                        act.maybe_api_token_str = Some(api_token_str.clone());
+                                        // Task 3.1: bind user to this WS connection
+                                        conn_mgr.do_send(ConnectionManagerMsg::BindUser {
+                                            user_id: user.id,
+                                            api_session_token_str: api_token_str,
+                                            ws_session_token: ws_token,
+                                        });
+                                        // Task 4.2: push FriendOnline to each confirmed friend
+                                        // (PushToUser silently drops for offline friends)
+                                        let user_id_str = user.id.to_string();
+                                        for friend in &user.friendships {
+                                            if matches!(
+                                                friend.friend_state,
+                                                PublicFriendState::IsFriend
+                                            ) {
+                                                conn_mgr.do_send(PushToUser {
+                                                    user_id: friend.user.id,
+                                                    msg: GameMsgOut::FriendOnline {
+                                                        user_id: user_id_str.clone(),
+                                                    },
+                                                });
+                                            }
+                                        }
                                         client_adapter_addr.do_send(ServerMessage::LoginResponse {
                                             success: true,
                                         });
-                                        // act.user_mgr.do_send(IntUserMgrMsg::StartPlaying(id));
                                     }
                                     Err(_) => {
-                                        // client_adapter_addr
-                                        //     .do_send(ServerMessage::Error(Some(srv_msg_err)));
                                         client_adapter_addr.do_send(ServerMessage::LoginResponse {
                                             success: false,
                                         });
                                     }
                                 }
                             } else {
-                                // client_adapter_addr
-                                //     .do_send(ServerMessage::Error(Some(SrvMsgError::Internal)));
-                                // TODO: logging here and on all mailbox errors.
                                 client_adapter_addr
                                     .do_send(ServerMessage::LoginResponse { success: false });
                             }
@@ -416,6 +438,64 @@ impl Handler<PlayerMessage> for ClientState {
                         err
                     }
                 }
+                // Tasks 5.4/5.5/5.6: game progression sub-protocol dispatch
+                GameProtocol(game_msg) => {
+                    let maybe_user_id = self.maybe_user_info.as_ref().map(|u| u.id);
+                    if let Some(user_id) = maybe_user_id {
+                        match game_msg {
+                            GameMsgIn::StartGame => {
+                                self.user_mgr
+                                    .send(user_mgr::msg::GetStartGameData { user_id })
+                                    .into_actor(self)
+                                    .then(move |res, _act, _| {
+                                        if let Ok(Ok(response)) = res {
+                                            client_adapter_addr
+                                                .do_send(ServerMessage::GameProtocol(response));
+                                        }
+                                        fut::ready(())
+                                    })
+                                    .wait(ctx);
+                            }
+                            GameMsgIn::LevelPage { mode, after_id, page_size } => {
+                                self.user_mgr
+                                    .send(user_mgr::msg::GetLevelPage {
+                                        user_id,
+                                        mode,
+                                        after_id,
+                                        page_size,
+                                    })
+                                    .into_actor(self)
+                                    .then(move |res, _act, _| {
+                                        if let Ok(Ok(response)) = res {
+                                            client_adapter_addr
+                                                .do_send(ServerMessage::GameProtocol(response));
+                                        }
+                                        fut::ready(())
+                                    })
+                                    .wait(ctx);
+                            }
+                            GameMsgIn::CompleteLevel { mode, level_id, stars } => {
+                                self.user_mgr
+                                    .send(user_mgr::msg::SubmitCompleteLevel {
+                                        user_id,
+                                        mode,
+                                        level_id,
+                                        stars,
+                                    })
+                                    .into_actor(self)
+                                    .then(move |res, _act, _| {
+                                        if let Ok(Ok(response)) = res {
+                                            client_adapter_addr
+                                                .do_send(ServerMessage::GameProtocol(response));
+                                        }
+                                        fut::ready(())
+                                    })
+                                    .wait(ctx);
+                            }
+                        }
+                    }
+                    ok
+                }
             }
         } else {
             err
@@ -468,14 +548,20 @@ impl Actor for ClientState {
     type Context = Context<Self>;
 
     fn stopping(&mut self, ctx: &mut Self::Context) -> Running {
-        // println!("ClientState: Stopping");
-
         if let Some(user_info) = self.maybe_user_info.clone() {
             self.user_mgr
                 .do_send(user_mgr::msg::IntUserMgrMsg::StopPlaying(
                     user_info.id,
                     ctx.address(),
                 ));
+            // Task 3.2: token-guarded unbind (no-op if kicked and new connection already mapped)
+            if let Some(token_str) = self.maybe_api_token_str.take() {
+                self.connection_mgr
+                    .do_send(ConnectionManagerMsg::UnbindUser {
+                        user_id: user_info.id,
+                        api_session_token_str: token_str,
+                    });
+            }
         }
 
         if let BacklinkState::Linked(client_adapter) = &self.backlinked_state {

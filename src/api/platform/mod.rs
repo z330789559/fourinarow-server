@@ -15,18 +15,11 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{
-    api::ApiResponse,
-    database::DatabaseManager,
-};
+use crate::{api::ApiResponse, database::DatabaseManager};
 
 pub fn config(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/wechat").route("/login", web::post().to(wechat_login)),
-    )
-    .service(
-        web::scope("/douyin").route("/login", web::post().to(douyin_login)),
-    );
+    cfg.service(web::scope("/wechat").route("/login", web::post().to(wechat_login)))
+        .service(web::scope("/douyin").route("/login", web::post().to(douyin_login)));
 }
 
 // ── shared request/response types ──────────────────────────────────────────
@@ -65,8 +58,9 @@ async fn wechat_login(
     let secret = std::env::var("WECHAT_SECRET").unwrap_or_default();
 
     if appid.is_empty() || secret.is_empty() {
-        return HttpResponse::ServiceUnavailable()
-            .json(ApiResponse::new("WeChat integration is not configured on this server"));
+        return HttpResponse::ServiceUnavailable().json(ApiResponse::new(
+            "WeChat integration is not configured on this server",
+        ));
     }
 
     let url = format!(
@@ -109,7 +103,8 @@ async fn wechat_login(
         }
     };
 
-    match db.users
+    match db
+        .users
         .find_or_create_platform_user(
             "wechat",
             &openid,
@@ -119,12 +114,10 @@ async fn wechat_login(
         )
         .await
     {
-        Some((user_id, session_token)) => {
-            HttpResponse::Ok().json(PlatformLoginResp {
-                session_token: session_token.to_string(),
-                user_id: user_id.to_string(),
-            })
-        }
+        Some((user_id, session_token)) => HttpResponse::Ok().json(PlatformLoginResp {
+            session_token: session_token.to_string(),
+            user_id: user_id.to_string(),
+        }),
         None => HttpResponse::InternalServerError()
             .json(ApiResponse::new("Failed to create or load user")),
     }
@@ -160,8 +153,9 @@ async fn douyin_login(
     let secret = std::env::var("DOUYIN_SECRET").unwrap_or_default();
 
     if appid.is_empty() || secret.is_empty() {
-        return HttpResponse::ServiceUnavailable()
-            .json(ApiResponse::new("Douyin integration is not configured on this server"));
+        return HttpResponse::ServiceUnavailable().json(ApiResponse::new(
+            "Douyin integration is not configured on this server",
+        ));
     }
 
     let body = DouyinCode2SessionReq {
@@ -217,7 +211,8 @@ async fn douyin_login(
         }
     };
 
-    match db.users
+    match db
+        .users
         .find_or_create_platform_user(
             "douyin",
             &openid,
@@ -227,12 +222,10 @@ async fn douyin_login(
         )
         .await
     {
-        Some((user_id, session_token)) => {
-            HttpResponse::Ok().json(PlatformLoginResp {
-                session_token: session_token.to_string(),
-                user_id: user_id.to_string(),
-            })
-        }
+        Some((user_id, session_token)) => HttpResponse::Ok().json(PlatformLoginResp {
+            session_token: session_token.to_string(),
+            user_id: user_id.to_string(),
+        }),
         None => HttpResponse::InternalServerError()
             .json(ApiResponse::new("Failed to create or load user")),
     }

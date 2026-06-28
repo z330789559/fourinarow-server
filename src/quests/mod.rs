@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 pub enum GameEvent {
     GamePlayed,
     GameWon,
+    LevelCompleted,
+    ItemPurchased,
+    InviteCreated,
 }
 
 impl GameEvent {
@@ -11,6 +14,9 @@ impl GameEvent {
         match self {
             GameEvent::GamePlayed => "games_played",
             GameEvent::GameWon => "games_won",
+            GameEvent::LevelCompleted => "level_completed",
+            GameEvent::ItemPurchased => "item_purchased",
+            GameEvent::InviteCreated => "invite_created",
         }
     }
 }

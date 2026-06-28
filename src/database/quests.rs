@@ -31,7 +31,7 @@ impl QuestCollection {
         QuestCollection { pool }
     }
 
-    pub async fn on_event(&self, user_id: &UserId, event: &GameEvent) -> Vec<(String, i32)> {
+    async fn on_event(&self, user_id: &UserId, event: &GameEvent) -> Vec<(String, i32)> {
         let mut rewards = Vec::new();
         let condition = event.condition_type();
         let uid = user_id.to_string();

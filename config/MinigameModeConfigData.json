@@ -1,0 +1,38 @@
+[
+  {
+    "mode": 1,
+    "name": "征途",
+    "legacyModeName": "mode1",
+    "levelConfigKey": "MinigameLevelConfig",
+    "sceneConfigKey": "MinigameSceneConfig",
+    "firstLevelId": 1,
+    "unlockByJourneyLevel": 1
+  },
+  {
+    "mode": 2,
+    "name": "人质",
+    "legacyModeName": "mode2",
+    "levelConfigKey": "MinigameLevelConfig",
+    "sceneConfigKey": "MinigameSceneConfig",
+    "firstLevelId": 1,
+    "unlockByJourneyLevel": 60
+  },
+  {
+    "mode": 3,
+    "name": "投石器",
+    "legacyModeName": "mode3",
+    "levelConfigKey": "MinigameLevelConfig",
+    "sceneConfigKey": "MinigameSceneConfig",
+    "firstLevelId": 1,
+    "unlockByJourneyLevel": 120
+  },
+  {
+    "mode": 4,
+    "name": "对战",
+    "legacyModeName": "mode4",
+    "levelConfigKey": "MinigameLevelConfig",
+    "sceneConfigKey": "MinigameSceneConfig",
+    "firstLevelId": 1,
+    "unlockByJourneyLevel": 1
+  }
+]

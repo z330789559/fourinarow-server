@@ -68,17 +68,13 @@ impl ChatMsgCollection {
         from_id: Option<UserId>,
         msg: PostedChatMsg,
     ) -> Result<(), ()> {
-        sqlx::query(
-            "INSERT INTO chat_messages (thread_id, from_id, content) VALUES ($1, $2, $3)",
-        )
-        .bind(&thread_id)
-        .bind(from_id.map(|u| u.to_string()))
-        .bind(&msg.content)
-        .execute(&self.pool)
-        .await
-        .map(|_| ())
-        .map_err(|_| ())
+        sqlx::query("INSERT INTO chat_messages (thread_id, from_id, content) VALUES ($1, $2, $3)")
+            .bind(&thread_id)
+            .bind(from_id.map(|u| u.to_string()))
+            .bind(&msg.content)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|_| ())
     }
 }
-
-
