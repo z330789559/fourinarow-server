@@ -8,6 +8,7 @@ pub mod invites;
 pub mod leaderboard;
 pub mod minigame_config;
 pub mod minigame_leaderboard;
+pub mod minigame_tasks;
 pub mod notifications;
 pub mod platform;
 pub mod quests;
@@ -38,7 +39,11 @@ pub fn config(cfg: &mut web::ServiceConfig) {
     .service(web::scope("/notifications").configure(notifications::config))
     .service(web::scope("/inbox").configure(inbox::config))
     .service(web::scope("/minigame-config").configure(minigame_config::config))
-    .service(web::scope("/minigame").configure(minigame_leaderboard::config));
+    .service(
+        web::scope("/minigame")
+            .configure(minigame_leaderboard::config)
+            .configure(minigame_tasks::config),
+    );
 }
 
 #[derive(Serialize)]
