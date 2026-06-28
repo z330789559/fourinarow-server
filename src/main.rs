@@ -31,7 +31,6 @@ async fn main() {
 
     if std::env::var("RUST_LOG").is_err() {
         // SAFETY: edition 2024 makes set_var unsafe (env writes aren't thread-safe).
-        // This runs at the very start of main, before any worker threads read the
         // environment, so there is no concurrent access.
         unsafe {
             std::env::set_var("RUST_LOG", "actix_web=info");
