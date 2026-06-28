@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use actix_web::{web, HttpRequest, HttpResponse};
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -72,6 +73,10 @@ async fn submit_score(
         .await
     {
         Ok((best_score, best_stars)) => {
+            // 任务系统：每局结束累加每日活跃（plays+1，通关则 clears+1），驱动每日任务。
+            db.minigame_tasks
+                .bump_daily(&game_key, &user_id, Utc::now().date_naive(), stars >= 1)
+                .await;
             let me = db
                 .minigame_leaderboard
                 .get_user_rank(&game_key, &user_id)
