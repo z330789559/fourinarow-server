@@ -80,10 +80,10 @@ impl MinigameTaskCollection {
         .await;
     }
 
-    /// 签到统计 (total, signed_today)。
-    pub async fn signin(&self, game_key: &str, user_id: &str, today: NaiveDate) -> (i64, bool) {
-        let row: Option<(i32, Option<NaiveDate>)> = sqlx::query_as(
-            "SELECT total, last_date FROM minigame_signin_stat \
+    /// 签到统计 (total, signed_today, streak连续签到数)。
+    pub async fn signin(&self, game_key: &str, user_id: &str, today: NaiveDate) -> (i64, bool, i64) {
+        let row: Option<(i32, Option<NaiveDate>, i32)> = sqlx::query_as(
+            "SELECT total, last_date, streak FROM minigame_signin_stat \
              WHERE user_id = $1 AND game_key = $2",
         )
         .bind(user_id)
@@ -93,24 +93,53 @@ impl MinigameTaskCollection {
         .ok()
         .flatten();
         match row {
-            Some((t, last)) => (t as i64, last == Some(today)),
-            None => (0, false),
+            Some((t, last, streak)) => (t as i64, last == Some(today), streak as i64),
+            None => (0, false, 0),
         }
     }
 
-    /// 上报签到：当日首次则 total+1 且 last_date=today（同日重复无副作用）。
+    /// 上报签到：当日首次则 total+1、last_date=today；并维护连续签到数 streak：
+    /// 昨天签过=streak+1（连续）；隔天断签=归 1（从头再来）；今天已签=不变。
     pub async fn report_signin(&self, game_key: &str, user_id: &str, today: NaiveDate) {
-        let _ = sqlx::query(
-            "INSERT INTO minigame_signin_stat (user_id, game_key, total, last_date) \
-             VALUES ($1, $2, 1, $3) \
-             ON CONFLICT (user_id, game_key) DO UPDATE SET \
-                 total = minigame_signin_stat.total \
-                     + (CASE WHEN minigame_signin_stat.last_date IS DISTINCT FROM EXCLUDED.last_date THEN 1 ELSE 0 END), \
-                 last_date = EXCLUDED.last_date",
+        let prev: Option<(Option<NaiveDate>, i32)> = sqlx::query_as(
+            "SELECT last_date, streak FROM minigame_signin_stat \
+             WHERE user_id = $1 AND game_key = $2",
         )
         .bind(user_id)
         .bind(game_key)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let yesterday = today.pred_opt();
+        let (new_streak, bump_total): (i32, i32) = match prev {
+            Some((Some(last), streak)) => {
+                if last == today {
+                    (streak.max(1), 0) // 今日已签，不变
+                } else if Some(last) == yesterday {
+                    (streak + 1, 1) // 昨天签过 → 连续 +1
+                } else {
+                    (1, 1) // 断签 → 从第一次重新开始
+                }
+            }
+            _ => (1, 1), // 首次签到
+        };
+
+        let _ = sqlx::query(
+            "INSERT INTO minigame_signin_stat (user_id, game_key, total, last_date, streak) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (user_id, game_key) DO UPDATE SET \
+                 total = minigame_signin_stat.total + $6, \
+                 last_date = EXCLUDED.last_date, \
+                 streak = EXCLUDED.streak",
+        )
+        .bind(user_id)
+        .bind(game_key)
+        .bind(bump_total)
         .bind(today)
+        .bind(new_streak)
+        .bind(bump_total)
         .execute(&self.pool)
         .await;
     }

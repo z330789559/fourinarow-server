@@ -104,6 +104,7 @@ enum Metric {
     DailyClears,
     SigninTotal,
     SignedToday,
+    SigninStreak,
 }
 
 /// 一次性载入玩家全部派生量，供本次请求所有任务读取。
@@ -113,6 +114,7 @@ struct Ctx {
     clears: i64,
     signin_total: i64,
     signed_today: bool,
+    signin_streak: i64,
     rank: Option<i64>,
 }
 
@@ -134,6 +136,7 @@ impl Ctx {
                     0
                 }
             }
+            Metric::SigninStreak => self.signin_streak,
         }
     }
 
@@ -149,7 +152,8 @@ impl Ctx {
 async fn load_ctx(db: &DatabaseManager, game_key: &str, user_id: &str, today: NaiveDate) -> Ctx {
     let agg = db.minigame_tasks.aggregate(game_key, user_id).await;
     let (plays, clears) = db.minigame_tasks.daily(game_key, user_id, today).await;
-    let (signin_total, signed_today) = db.minigame_tasks.signin(game_key, user_id, today).await;
+    let (signin_total, signed_today, signin_streak) =
+        db.minigame_tasks.signin(game_key, user_id, today).await;
     let rank = db
         .minigame_leaderboard
         .get_user_rank(game_key, user_id)
@@ -161,6 +165,7 @@ async fn load_ctx(db: &DatabaseManager, game_key: &str, user_id: &str, today: Na
         clears,
         signin_total,
         signed_today,
+        signin_streak,
         rank,
     }
 }
@@ -246,12 +251,13 @@ struct Tier {
 }
 
 enum AchKind {
-    /// 均匀档：阈值 (init+step)*gap；奖励 gold=(step+1)*gold_coef；cap=None 表示无上限。
+    /// 均匀档：阈值 (init+step)*gap；奖励 (step+1)*coef（类型 reward_kind）；cap=None 表示无上限。
     Uniform {
         init: i64,
         gap: i64,
         cap: Option<i64>,
-        gold_coef: i64,
+        reward_kind: RewardKind,
+        coef: i64,
     },
     /// 显式档位（非均匀，如排行榜）；cap = 档数。
     Tiers(Vec<Tier>),
@@ -285,7 +291,9 @@ impl AchDef {
 
     fn rewards(&self, step: i64) -> Vec<Reward> {
         match &self.kind {
-            AchKind::Uniform { gold_coef, .. } => vec![gold((step + 1) * gold_coef)],
+            AchKind::Uniform { reward_kind, coef, .. } => {
+                vec![Reward { kind: *reward_kind, amount: (step + 1) * coef }]
+            }
             AchKind::Tiers(tiers) => tiers
                 .get(step as usize)
                 .map(|t| t.rewards.clone())
@@ -317,6 +325,7 @@ fn uniform_desc(metric: Metric, threshold: i64) -> String {
         Metric::TotalScore => format!("累计总分达到 {}", threshold),
         Metric::TotalStars => format!("累计获得 {}★", threshold),
         Metric::LevelsCleared => format!("累计通关 {} 关", threshold),
+        Metric::SigninStreak => format!("连续签到 {} 次", threshold),
         _ => format!("达到 {}", threshold),
     }
 }
@@ -340,14 +349,22 @@ fn ach_defs() -> Vec<AchDef> {
             title: "分数大师",
             metric: Metric::TotalScore,
             direction: Direction::Asc,
-            kind: AchKind::Uniform { init: 1, gap: 50000, cap: None, gold_coef: 500 },
+            kind: AchKind::Uniform { init: 1, gap: 50000, cap: None, reward_kind: RewardKind::Gold, coef: 500 },
         },
         AchDef {
             id: "perfectionist",
             title: "完美主义",
             metric: Metric::TotalStars,
             direction: Direction::Asc,
-            kind: AchKind::Uniform { init: 1, gap: 10, cap: Some(30), gold_coef: 300 },
+            kind: AchKind::Uniform { init: 1, gap: 10, cap: Some(30), reward_kind: RewardKind::Gold, coef: 300 },
+        },
+        AchDef {
+            // 连续签到无限轮：第 N 轮=连续签到 N 次，奖 N 点体力（断签归 1 重攒；体力上限由客户端钳到 100）。
+            id: "signin_streak",
+            title: "香火不断",
+            metric: Metric::SigninStreak,
+            direction: Direction::Asc,
+            kind: AchKind::Uniform { init: 1, gap: 1, cap: None, reward_kind: RewardKind::Energy, coef: 1 },
         },
     ]
 }
@@ -579,9 +596,28 @@ mod tests {
     }
 
     #[test]
+    fn minigame_tasks_signin_streak_unbounded_energy() {
+        let d = find_ach("signin_streak");
+        assert_eq!(d.cap(), None); // 无上限
+        // 第 N 轮 = 连续签到 N 次（init=1,gap=1 → 阈值=step+1）
+        assert_eq!(d.threshold(0), 1);
+        assert_eq!(d.threshold(99), 100);
+        assert_eq!(d.threshold(999), 1000);
+        // 奖励 = N 点体力（energy 类型，(step+1)*1）
+        assert_eq!(d.rewards(0)[0].kind.as_str(), "energy");
+        assert_eq!(d.rewards(0)[0].amount, 1);
+        assert_eq!(d.rewards(99)[0].amount, 100);
+        assert_eq!(d.rewards(999)[0].amount, 1000);
+        // 升序达成：连续数 >= 门槛
+        assert!(d.satisfied(1, 0));
+        assert!(d.satisfied(100, 99));
+        assert!(!d.satisfied(99, 99));
+    }
+
+    #[test]
     fn minigame_tasks_catalog_shape() {
         assert_eq!(main_defs().len(), 7);
         assert_eq!(daily_defs().len(), 4);
-        assert_eq!(ach_defs().len(), 3);
+        assert_eq!(ach_defs().len(), 4);
     }
 }
