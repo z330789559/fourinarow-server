@@ -10,7 +10,7 @@
 
 -- 可在命令行覆盖： psql -v app_user=fourinarow_app -v app_pass='S3cr3t' -v db_name=fourinarow ...
 \if :{?app_user} \else \set app_user 'fourinarow_app' \endif
-\if :{?app_pass} \else \set app_pass 'CHANGE_ME_strong_password' \endif
+\if :{?app_pass} \else \set app_pass 'fourinarow_app' \endif
 \if :{?db_name}  \else \set db_name  'fourinarow' \endif
 
 -- ── 1. 创建专用应用账号（角色） ────────────────────────────────────────────────
