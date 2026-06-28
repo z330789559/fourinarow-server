@@ -23,7 +23,7 @@ use game::connection_mgr::ConnectionManager;
 use game::lobby_mgr::LobbyManager;
 use logging::{ActivityLogHandle, Logger};
 
-const DEFAULT_BIND_ADDR: &str = "127.0.0.1:40146";
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:7060";
 
 #[actix_web::main]
 async fn main() {

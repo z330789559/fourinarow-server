@@ -23,8 +23,8 @@ RUN cargo build --release
 # Run the binary
 FROM debian:bullseye-slim
 
-EXPOSE 8080
-ENV BIND=0.0.0.0:8080
+EXPOSE 7060
+ENV BIND=0.0.0.0:7060
 
 COPY --from=builder /code/target/release/fourinarow-server /fourinarow-server
 COPY ./static /static
