@@ -329,8 +329,8 @@ impl Handler<LobbyMessage> for Lobby {
                 if let LobbyState::TwoPlayers {
                     game_oid: _,
                     game_type,
-                    ref host_addr,
-                    ref joined_addr,
+                    host_addr,
+                    joined_addr,
                 } = &mut self.lobby_state
                 {
                     match game_type {

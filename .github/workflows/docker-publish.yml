@@ -1,0 +1,66 @@
+name: Build and Publish Docker image
+
+# master 有提交就构建镜像并推送到 GitHub Packages (GHCR)。
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}   # 允许在 Actions 页面手动触发
+
+env:
+  REGISTRY: ghcr.io
+  # 镜像名 = ghcr.io/<owner>/<repo>，例如 ghcr.io/z330789559/fourinarow-server
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write       # 推送到 GHCR 必需
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 镜像名必须全小写；owner/repo 含大写时也能正常工作
+      - name: Lowercase image name
+        id: img
+        run: echo "name=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
+      # Dockerfile 里有 `COPY .env /.env`，但 .env 被 gitignore。
+      # 真正的配置在运行时由环境变量注入（见 docker-compose.yml），这里放空文件即可，
+      # 避免把任何密钥打进镜像。
+      - name: Create placeholder .env
+        run: touch .env
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+            type=ref,event=branch
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

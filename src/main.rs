@@ -30,7 +30,12 @@ async fn main() {
     dotenv().expect("Failed to load .env file");
 
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "actix_web=info");
+        // SAFETY: edition 2024 makes set_var unsafe (env writes aren't thread-safe).
+        // This runs at the very start of main, before any worker threads read the
+        // environment, so there is no concurrent access.
+        unsafe {
+            std::env::set_var("RUST_LOG", "actix_web=info");
+        }
     }
 
     let bind_addr = if let Some(addr) = std::env::var("BIND").ok() {
