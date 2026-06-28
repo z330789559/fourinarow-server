@@ -21,3 +21,8 @@ flamegraph.svg
 db/*
 .idea
 docs/
+
+# Database dumps (contain real user PII — never commit)
+*.dump
+fourinarow_*.sql
+deploy/dumps/
