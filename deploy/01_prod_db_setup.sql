@@ -15,17 +15,16 @@
 
 -- ── 1. 创建专用应用账号（角色） ────────────────────────────────────────────────
 -- 已存在则改密码，不存在则创建。LOGIN = 可登录账号。
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_user') THEN
-        EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', :'app_user', :'app_pass');
-        RAISE NOTICE 'role % already exists -> password updated', :'app_user';
-    ELSE
-        EXECUTE format('CREATE ROLE %I WITH LOGIN PASSWORD %L', :'app_user', :'app_pass');
-        RAISE NOTICE 'role % created', :'app_user';
-    END IF;
-END
-$$;
+-- 注意：psql 的 :'var' 变量插值【不会】在 $$...$$ dollar 引号内生效（psql 把整个
+-- 块当字符串原样发给服务端，: 不替换 → 语法错），所以这里不能用 DO 块。
+-- 改用 format()+\gexec（与下方 CREATE DATABASE 同款）：format 在 $$ 之外，
+-- :'app_user' / :'app_pass' 能正常替换；\gexec 再执行拼好的 DDL。
+SELECT format('CREATE ROLE %I WITH LOGIN PASSWORD %L', :'app_user', :'app_pass')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_user')
+\gexec
+SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', :'app_user', :'app_pass')
+WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_user')
+\gexec
 
 -- ── 2. 创建专用数据库，属主 = 应用账号 ─────────────────────────────────────────
 -- CREATE DATABASE 不能放进事务/DO 块，所以用 \gexec 动态执行；已存在则跳过。
