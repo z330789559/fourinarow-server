@@ -116,6 +116,8 @@ async fn start_server(bind_addr: &str) -> io::Result<()> {
                     .wrap(
                         Cors::default()
                             .allowed_origin("https://play.fourinarow.ffactory.me")
+                            .allowed_origin("https://console.ambrus.studio")
+                            .allowed_origin("https://api.ambrus.studio")
                             .allowed_origin("http://localhost")
                             // 开发：放行任意端口的 localhost / 127.0.0.1（Cocos 预览 :7456、浏览器预览等）。
                             // 上线正式域名时按需收紧；写接口仍受 admin token 保护。
